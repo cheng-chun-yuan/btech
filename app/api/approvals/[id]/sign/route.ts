@@ -33,12 +33,10 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     const amountSats =
       approval.amountSats ?? Math.round(parseFloat(approval.btc ?? "0") * 1e8);
     try {
-      const report = await runSignApproval({
-        recipient,
-        amountSats,
-        nonce: approval.id,
-        memo: approval.title,
-      });
+      const report = await runSignApproval(
+        { recipient, amountSats, nonce: approval.id, memo: approval.title },
+        auditChatId, // sign with this vault's own key
+      );
       proof = {
         digest: report.authorization_digest,
         signature: report.aggregate_signature,

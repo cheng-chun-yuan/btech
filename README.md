@@ -54,7 +54,13 @@ DKGKit gives BTech the full threshold-signing lifecycle:
 - **Per-chat audit log** — every propose / sign / message is recorded and is
   **visible only to vault members**; outsiders are denied.
 - **Persistent state** — sessions, chats, messages, approvals, and signatures
-  persist across restarts (local SQLite); the Rust crypto stays stateless.
+  persist across restarts (local SQLite).
+- **Live regtest chain** — vault addresses, balances, and UTXOs come from a real
+  regtest Esplora API; the header shows the live chain tip.
+- **Real Nostr relay** — `relaydemo` runs a genuine multi-agent HTSS DKG over a
+  self-hosted relay with NIP-44-encrypted round-2 shares.
+- **Login by key proof** — sign in via NIP-07 or nsec by signing a one-time
+  challenge (knowing a public npub is not enough).
 
 ## Quickstart
 
@@ -62,26 +68,46 @@ Requires the [`dkgkit`](../dkgkit) crates as a sibling checkout, plus
 [Bun](https://bun.sh) and a Rust toolchain.
 
 ```bash
-cargo build        # build the Rust DKGKit service
+cargo build                 # build the CLI + vaultd + relaydemo binaries
 bun install
-bun run dev        # http://localhost:3000  (log in with a demo persona)
+
+# Optional but recommended: run the vault service (DKG once, stable address,
+# fast signing). The app uses it when BTECH_VAULTD_URL is set.
+./target/debug/vaultd       # http://127.0.0.1:8787
+
+cp .env.example .env.local  # BTECH_ESPLORA_URL + BTECH_VAULTD_URL
+bun run dev                 # http://localhost:3000  (log in with a demo persona)
 ```
 
-The live vault runs on **regtest**. App state lives in `data/btech.db`
-(override with `BTECH_DB`); delete it to reset the demo.
+Config (see `.env.example`):
 
-The console exposes auth (`/api/auth/*`), chat/approval persistence
+- `BTECH_ESPLORA_URL` — regtest Esplora API for chain status / balances / UTXOs
+  (default `https://btc.utxopia.com/regtest`).
+- `BTECH_VAULTD_URL` — vault service URL; unset = CLI fallback (fresh, non-stable
+  address per call).
+- `BTECH_DB` — SQLite path (default `data/btech.db`; delete to reset the demo).
+
+Run a real DKG over a live relay:
+
+```bash
+docker compose -f ../dkgkit/examples/self-hosted-relay/docker-compose.yml up -d
+DKGKIT_RELAY=ws://127.0.0.1:7777 cargo run --bin relaydemo
+```
+
+The console exposes auth + key-proof (`/api/auth/*`), chat/approval persistence
 (`/api/chats`, `/api/messages`, `/api/approvals`, `/api/approvals/[id]/sign`),
-the member-only audit log (`/api/chats/[id]/audit`), and the raw DKGKit proof
-routes (`/api/demo`, `/api/session-proof`). See `app/api/` for shapes.
+the member-only audit log (`/api/chats/[id]/audit`), vault provisioning
+(`/api/vaults/[id]/provision`), and chain status (`/api/chain/tip`,
+`/api/chain/address/[addr]`). See `app/api/` for shapes.
 
 ## Scope & roadmap
 
-This is a local demo shell focused on the threshold-control story:
-DKG → Taproot address → grouped HTSS approval → BIP340 verification, with login,
-persistence, and audit. **Reshare and recovery** are DKGKit capabilities the
-platform is designed around and are next on the roadmap for the console.
+This is a demo shell focused on the threshold-control story: DKG → Taproot
+address → grouped HTSS approval → BIP340 verification, with key-proof login,
+persistence, audit, live regtest chain status, and a real relay-backed DKG demo.
 
-Not yet included: production relay networking, NIP-44 encryption, PSBT
-construction, transaction broadcast, and mainnet custody. Not financial or
-custody advice.
+Honest scope line: for the main vault flow the shares live inside the service
+(`vaultd`); `relaydemo` shows the per-participant/per-device relay path that
+closes that gap. **Reshare/recovery (#9)**, **PSBT construction + broadcast
+(#5, real on-chain spends)**, and **mainnet** are the next tiers. Not financial
+or custody advice.

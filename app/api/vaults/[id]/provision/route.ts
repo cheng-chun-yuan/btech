@@ -33,7 +33,7 @@ export async function POST(_req: Request, context: { params: Promise<{ id: strin
 
   let receiveAddress: string;
   try {
-    const report = await runDemo();
+    const report = await runDemo(id); // this DM's own DKG vault
     receiveAddress = report.receive_address;
   } catch (err) {
     return NextResponse.json(

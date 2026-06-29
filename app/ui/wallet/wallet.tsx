@@ -1,15 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 import { ApprovalCard } from "./approval-card";
-import {
-  BTC_USD,
-  buildLiveApproval,
-  buildLiveVault,
-} from "./data";
+import { buildLiveApproval, buildLiveVault } from "./data";
+import { useBtcPrice } from "./use-btc-price";
 import type {
   Approval,
   Chat,
@@ -89,6 +86,44 @@ export default function Wallet() {
   const [signingId, setSigningId] = useState<string | null>(null);
   const [me, setMe] = useState<{ npub: string; label: string; participant_id: number | null } | null>(null);
   const [audit, setAudit] = useState<{ entries?: AuditEntryUI[]; restricted?: boolean }>({});
+  const [chainTip, setChainTip] = useState<number | null>(null);
+  const btcPrice = useBtcPrice();
+
+  useEffect(() => {
+    fetch("/api/chain/tip")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d?.height != null) setChainTip(d.height);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Replace placeholder balances with the real on-chain balance of each vault's
+  // receive address (fetched once per address). Deposits to the address show up.
+  const balancedAddrs = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const targets = chats.filter(
+      (c) => c.receiveAddress && !balancedAddrs.current.has(c.receiveAddress),
+    );
+    if (targets.length === 0) return;
+    const targetIds = new Set(targets.map((c) => c.id));
+    targets.forEach((c) => balancedAddrs.current.add(c.receiveAddress!));
+    // Mark pending ("") so the UI shows a loading state, not the seeded number.
+    setChats((prev) => prev.map((x) => (targetIds.has(x.id) ? { ...x, balanceBtc: "" } : x)));
+    for (const c of targets) {
+      void (async () => {
+        let sats = 0;
+        try {
+          const r = await fetch(`/api/chain/address/${c.receiveAddress}`);
+          if (r.ok) sats = ((await r.json()) as { totalSats: number }).totalSats;
+        } catch {
+          /* unreachable / demo address → treat as 0 */
+        }
+        const btc = sats / 1e8;
+        setChats((prev) => prev.map((x) => (x.id === c.id ? { ...x, balanceBtc: btc.toFixed(8) } : x)));
+      })();
+    }
+  }, [chats]);
 
   const refreshAudit = useCallback(async (chatId: string) => {
     const res = await fetch(`/api/chats/${chatId}/audit`);
@@ -100,6 +135,26 @@ export default function Wallet() {
   const onLogout = useCallback(async () => {
     await fetch("/api/auth/logout", { method: "POST" });
     window.location.href = "/login";
+  }, []);
+
+  const onCreateChannel = useCallback(async () => {
+    const name = window.prompt("New channel name (e.g. marketing)");
+    if (!name?.trim()) return;
+    try {
+      const res = await fetch("/api/chats", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) throw new Error(((await res.json()) as { error?: string }).error ?? "Create failed");
+      const { chat } = (await res.json()) as { chat: Chat };
+      setChats((prev) => [...prev, { ...chat, messages: [] }]);
+      setView("chat");
+      setActiveChat(chat.id);
+      setDraft("");
+    } catch (e) {
+      setStateError(e instanceof Error ? e.message : "Create channel failed");
+    }
   }, []);
 
   const [provisioningId, setProvisioningId] = useState<string | null>(null);
@@ -340,7 +395,7 @@ export default function Wallet() {
     const policy = chat.tiers.map((t) => `${clampNeed(t)}/${t.keys.length}`).join(" + ");
     const dest = sendForm.dest.trim();
     const destShort = dest.length > 16 ? `${dest.slice(0, 8)}…${dest.slice(-4)}` : dest;
-    const usd = Math.round(amt * BTC_USD).toLocaleString("en-US");
+    const usd = btcPrice != null ? Math.round(amt * btcPrice).toLocaleString("en-US") : "";
     const cid = activeChat;
     const module = sendForm.module;
     setSendForm({ open: false, module: "Bitcoin regtest", dest: "", amount: "" });
@@ -387,9 +442,12 @@ export default function Wallet() {
   };
 
   // ---- derived values ----
-  const totalBtc = chats.reduce((s, c) => s + parseFloat(c.balanceBtc), 0);
-  const totalKeys = chats.reduce((s, c) => s + c.tiers.reduce((a, t) => a + t.keys.length, 0), 0);
-  const vaultCount = chats.length;
+  // Only chats with a shared vault count toward treasury totals (DMs are chat-only).
+  const vaultChats = chats.filter((c) => c.vaultStatus || c.tiers.length > 0);
+  const totalBtc = vaultChats.reduce((s, c) => s + (parseFloat(c.balanceBtc) || 0), 0);
+  const balancesPending = vaultChats.some((c) => c.receiveAddress && c.balanceBtc === "");
+  const totalKeys = vaultChats.reduce((s, c) => s + c.tiers.reduce((a, t) => a + t.keys.length, 0), 0);
+  const vaultCount = vaultChats.length;
   const pendingCount = approvals.filter((t) => t.status === "pending" || t.status === "ready").length;
   const youNeed = approvals.filter((t) => !t.youSigned && t.status === "pending").length;
   const sendApprovals = approvals.filter((a) => a.kind !== "role");
@@ -431,6 +489,7 @@ export default function Wallet() {
         go={go}
         openChat={openChat}
         goPlan={go("plan")}
+        onCreateChannel={onCreateChannel}
       />
 
       <main style={{ flex: 1, height: "100%", display: "flex", flexDirection: "column", minWidth: 0 }}>
@@ -442,8 +501,14 @@ export default function Wallet() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${C.line2}`, borderRadius: 9, padding: "8px 12px", fontSize: 12.5, color: "#9CA1A7" }}>
               <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.green, boxShadow: "0 0 0 3px rgba(63,185,80,.16)" }} />
-              BTC ${BTC_USD.toLocaleString("en-US")}
+              {btcPrice != null ? `BTC $${btcPrice.toLocaleString("en-US")}` : "BTC · syncing…"}
             </div>
+            {chainTip != null && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${C.line2}`, borderRadius: 9, padding: "8px 12px", fontSize: 12.5, color: "#9CA1A7" }} title="Live regtest chain tip">
+                <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.orange, boxShadow: "0 0 0 3px rgba(247,147,26,.16)" }} />
+                regtest · tip {chainTip.toLocaleString("en-US")}
+              </div>
+            )}
             {me && (
               <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${C.line2}`, borderRadius: 9, padding: "6px 8px 6px 12px", fontSize: 12.5, color: "#9CA1A7" }}>
                 <span>
@@ -475,8 +540,8 @@ export default function Wallet() {
           {view === "overview" && (
             <Overview
               wstate={wstate}
-              balanceBtc={totalBtc.toFixed(2)}
-              balanceUsd={Math.round(totalBtc * BTC_USD).toLocaleString("en-US")}
+              balanceBtc={balancesPending ? "…" : totalBtc.toFixed(2)}
+              balanceUsd={balancesPending || btcPrice == null ? "…" : Math.round(totalBtc * btcPrice).toLocaleString("en-US")}
               vaultCount={vaultCount}
               totalKeys={totalKeys}
               pendingCount={pendingCount}
@@ -544,6 +609,7 @@ function Sidebar({
   go,
   openChat,
   goPlan,
+  onCreateChannel,
 }: {
   view: View;
   active: Chat | null;
@@ -552,6 +618,7 @@ function Sidebar({
   go: (v: View) => () => void;
   openChat: (id: string) => () => void;
   goPlan: () => void;
+  onCreateChannel: () => void;
 }) {
   const nav = [
     { key: "overview" as const, label: "Overview", icon: "◉", badge: "" },
@@ -593,7 +660,16 @@ function Sidebar({
       </nav>
 
       <div style={{ marginTop: 7, paddingLeft: 8, display: "flex", flexDirection: "column", gap: 2 }}>
-        <div style={{ fontSize: 10, color: "#5E6369", letterSpacing: ".5px", padding: "5px 10px 3px" }}>CHANNELS</div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 10px 3px" }}>
+          <span style={{ fontSize: 10, color: "#5E6369", letterSpacing: ".5px" }}>CHANNELS</span>
+          <button
+            onClick={onCreateChannel}
+            title="Create a channel vault"
+            style={{ background: "transparent", border: "none", color: C.orange, fontSize: 15, lineHeight: 1, cursor: "pointer", fontFamily: "inherit", padding: "0 2px" }}
+          >
+            +
+          </button>
+        </div>
         {channels.map((c) => {
           const on = view === "chat" && !!active && c.id === active.id;
           return (
@@ -896,7 +972,7 @@ function ChatDetail({
           <div style={{ fontSize: 11.5, color: C.faint2, display: "flex", alignItems: "center", gap: 7, marginTop: 2 }}>
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }} />
             {isDirect ? "Direct message" : "Channel"} · {chat.members} members
-            {hasVault ? ` · ${chat.balanceBtc} BTC` : ""}
+            {hasVault ? (chat.balanceBtc === "" ? " · syncing…" : ` · ${chat.balanceBtc} BTC`) : ""}
           </div>
         </div>
         {hasVault && (
@@ -972,15 +1048,13 @@ function ChatDetail({
         {showVault && hasVault && (
           <VaultPanel chat={chat} setThreshold={setThreshold} removeKey={removeKey} proposeKey={proposeKey} />
         )}
-        <div style={{ flex: "0 0 296px", display: "flex", flexDirection: "column", gap: 14, minHeight: 0 }}>
-          <VaultCard chat={chat} isDirect={isDirect} provisioning={provisioning} onCreateVault={onCreateVault} />
-          {!isDirect && (
-            <>
-              <OngoingProposals proposals={pendingApprovals} onSign={onSign} signingId={signingId} />
-              <AuditPanel audit={audit} />
-            </>
-          )}
-        </div>
+        {!isDirect && (
+          <div style={{ flex: "0 0 296px", display: "flex", flexDirection: "column", gap: 14, minHeight: 0 }}>
+            <VaultCard chat={chat} isDirect={isDirect} provisioning={provisioning} onCreateVault={onCreateVault} />
+            <OngoingProposals proposals={pendingApprovals} onSign={onSign} signingId={signingId} />
+            <AuditPanel audit={audit} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1004,6 +1078,22 @@ function VaultCard({
   const status: "none" | "pending" | "active" = provisioning
     ? "pending"
     : (chat.vaultStatus ?? (chat.tiers.length > 0 ? "active" : "none"));
+
+  const [chain, setChain] = useState<{ totalSats: number; confirmedSats: number; mempoolSats: number } | null>(null);
+  const [chainErr, setChainErr] = useState(false);
+  useEffect(() => {
+    if (status !== "active" || !chat.receiveAddress) return;
+    let cancelled = false;
+    setChain(null);
+    setChainErr(false);
+    fetch(`/api/chain/address/${chat.receiveAddress}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("chain"))))
+      .then((d) => !cancelled && setChain(d))
+      .catch(() => !cancelled && setChainErr(true));
+    return () => {
+      cancelled = true;
+    };
+  }, [status, chat.receiveAddress]);
 
   return (
     <aside style={{ flex: "0 0 auto", background: C.surface, border: `1px solid ${C.line2}`, borderRadius: 16, padding: 16 }}>
@@ -1043,6 +1133,23 @@ function VaultCard({
             </div>
           ) : (
             <div style={{ fontSize: 11.5, color: C.sand, marginTop: 4 }}>Address provisioning…</div>
+          )}
+          {chat.receiveAddress && (
+            <>
+              <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px", marginTop: 12 }}>
+                On-chain balance · regtest
+              </div>
+              <div style={{ fontFamily: MONO, fontSize: 13, color: chain && chain.totalSats > 0 ? C.green : "#C5C9CE", marginTop: 3 }}>
+                {chain
+                  ? `${(chain.totalSats / 1e8).toFixed(8)} BTC`
+                  : chainErr
+                    ? "—"
+                    : "checking…"}
+                {chain && chain.mempoolSats > 0 && (
+                  <span style={{ color: C.sand }}> ({(chain.mempoolSats / 1e8).toFixed(8)} pending)</span>
+                )}
+              </div>
+            </>
           )}
           {chat.tiers.length > 0 && (
             <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint2, marginTop: 10 }}>

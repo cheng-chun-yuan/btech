@@ -1,23 +1,30 @@
-//! btech-vaultd — a long-lived vault service.
+//! btech-vaultd — a long-lived, multi-vault service.
 //!
-//! Runs the HTSS DKG once at startup and keeps the finalized vault in memory, so
-//! signing reuses the same key (run once, sign many) instead of regenerating the
-//! vault on every request. The Next app calls it over HTTP.
+//! Holds one finalized HTSS vault per id (each its own DKG / group key / address),
+//! running each ceremony once and reusing it. The Next app calls it over HTTP and
+//! passes `?id=<chatId>` so every channel/vault gets a distinct, stable address
+//! you can deposit regtest funds into.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
 use serde::Deserialize;
 
-use btech::WalletApp;
+use btech::{DemoReport, WalletApp};
 
 struct AppState {
-    app: Mutex<WalletApp>,
+    vaults: Mutex<HashMap<String, WalletApp>>,
+}
+
+#[derive(Deserialize)]
+struct VaultQuery {
+    id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -33,43 +40,55 @@ fn err500(e: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
+/// Get the vault for `id`, creating + running its DKG once on first use.
+fn with_vault<T>(
+    state: &AppState,
+    id: &str,
+    f: impl FnOnce(&mut WalletApp) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let mut map = state.vaults.lock().expect("vault map lock");
+    if !map.contains_key(id) {
+        let mut app = WalletApp::demo()?;
+        app.init()?;
+        eprintln!("btech-vaultd: provisioned vault '{id}'");
+        map.insert(id.to_string(), app);
+    }
+    f(map.get_mut(id).expect("vault present"))
+}
+
 async fn healthz() -> &'static str {
     "ok"
 }
 
 async fn vault_state(
     State(state): State<Arc<AppState>>,
+    Query(q): Query<VaultQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let value = {
-        let mut app = state.app.lock().expect("vault lock");
-        app.vault_state().map_err(err500)?
-    };
+    let id = q.id.unwrap_or_else(|| "treasury".to_string());
+    let value = with_vault(&state, &id, |app| app.vault_state()).map_err(err500)?;
     Ok(Json(value))
 }
 
 async fn vault_sign(
     State(state): State<Arc<AppState>>,
+    Query(q): Query<VaultQuery>,
     Json(req): Json<SignReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let report = {
-        let mut app = state.app.lock().expect("vault lock");
+) -> Result<Json<DemoReport>, (StatusCode, String)> {
+    let id = q.id.unwrap_or_else(|| "treasury".to_string());
+    let report = with_vault(&state, &id, |app| {
         app.sign_payment(req.nonce, req.recipient, req.amount_sats, req.memo)
-            .map_err(err500)?
-    };
-    Ok(Json(serde_json::to_value(report).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-    })?))
+    })
+    .map_err(err500)?;
+    Ok(Json(report))
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut app = WalletApp::demo()?;
-    app.init()?; // run DKG once up front
-    eprintln!("btech-vaultd: vault DKG finalized");
-
     let state = Arc::new(AppState {
-        app: Mutex::new(app),
+        vaults: Mutex::new(HashMap::new()),
     });
+    // Warm the default treasury vault so the first page load is instant.
+    with_vault(&state, "treasury", |_| Ok(()))?;
 
     let router = Router::new()
         .route("/healthz", get(healthz))
