@@ -114,6 +114,24 @@ export function seed(db: DB): void {
   );
 
   const seedTx = db.transaction(() => {
+    // Placeholder row for the live treasury vault so its messages + audit can
+    // persist; the UI overlays the real DKGKit crypto display on top.
+    insertChat.run(
+      "treasury",
+      "channel",
+      "#treasury-ops",
+      JSON.stringify({
+        id: "treasury",
+        type: "channel",
+        name: "#treasury-ops",
+        desc: "Live DKGKit grouped vault",
+        members: 0,
+        balanceBtc: "0",
+        balanceUsd: "0",
+        live: true,
+        tiers: [],
+      }),
+    );
     for (const chat of MOCK_CHATS as Chat[]) {
       const { messages, ...meta } = chat;
       insertChat.run(chat.id, chat.type, chat.name, JSON.stringify(meta));

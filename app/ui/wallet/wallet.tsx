@@ -7,14 +7,13 @@ import type { CSSProperties } from "react";
 import { ApprovalCard } from "./approval-card";
 import {
   BTC_USD,
-  MOCK_APPROVALS,
-  MOCK_CHATS,
   buildLiveApproval,
   buildLiveVault,
 } from "./data";
 import type {
   Approval,
   Chat,
+  ChatMessage,
   SignerKey,
   Tier,
   WalletState,
@@ -42,6 +41,14 @@ const SANS = "'Space Grotesk', system-ui, sans-serif";
 
 type View = "overview" | "approvals" | "chat" | "plan";
 type Tab = "send" | "admin";
+
+type AuditEntryUI = {
+  id: string;
+  actor_label: string;
+  action: "propose" | "sign" | "message" | "join";
+  detail: string | null;
+  created_at: number;
+};
 
 const STATUS_COLOR: Record<SignerKey["status"], string> = {
   online: "#3FB950",
@@ -73,31 +80,73 @@ export default function Wallet() {
   const [draft, setDraft] = useState("");
   const [sendForm, setSendForm] = useState({ open: false, module: "Bitcoin mainnet", dest: "", amount: "" });
 
-  const [chats, setChats] = useState<Chat[]>(MOCK_CHATS);
-  const [approvals, setApprovals] = useState<Approval[]>(MOCK_APPROVALS);
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [approvals, setApprovals] = useState<Approval[]>([]);
 
   const [wstate, setWstate] = useState<WalletState | null>(null);
   const [stateError, setStateError] = useState<string | null>(null);
   const [signingId, setSigningId] = useState<string | null>(null);
+  const [me, setMe] = useState<{ npub: string; label: string; participant_id: number | null } | null>(null);
+  const [audit, setAudit] = useState<{ entries?: AuditEntryUI[]; restricted?: boolean }>({});
 
-  // Load the real DKGKit vault state and fold it into the UI.
+  const refreshAudit = useCallback(async (chatId: string) => {
+    const res = await fetch(`/api/chats/${chatId}/audit`);
+    if (res.status === 403) return setAudit({ restricted: true });
+    if (!res.ok) return setAudit({});
+    setAudit({ entries: ((await res.json()) as { entries: AuditEntryUI[] }).entries });
+  }, []);
+
+  // Load persisted chats/approvals/identity plus the real DKGKit vault state,
+  // and fold the live vault in on top.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch("/api/wallet/state", { method: "GET" });
-        const json = await res.json();
+        const [chatsRes, apprRes, stateRes, meRes] = await Promise.all([
+          fetch("/api/chats"),
+          fetch("/api/approvals"),
+          fetch("/api/wallet/state"),
+          fetch("/api/auth/me"),
+        ]);
         if (cancelled) return;
-        if (!res.ok) {
-          setStateError(json.error ?? "Failed to load live vault");
-          return;
+
+        const apiChats: Chat[] = (await chatsRes.json().catch(() => ({}))).chats ?? [];
+        const apiApprovals: Approval[] = (await apprRes.json().catch(() => ({}))).approvals ?? [];
+        if (meRes.ok) {
+          const m = await meRes.json().catch(() => null);
+          if (m) setMe({ npub: m.npub, label: m.label, participant_id: m.participant_id });
         }
-        const ws = json as WalletState;
-        setWstate(ws);
-        setChats((prev) => [buildLiveVault(ws), ...prev.filter((c) => c.id !== "treasury")]);
-        setApprovals((prev) => [buildLiveApproval(ws), ...prev.filter((a) => a.id !== "tx1")]);
+
+        if (stateRes.ok) {
+          const ws = (await stateRes.json()) as WalletState;
+          setWstate(ws);
+          const apiTreasury = apiChats.find((c) => c.id === "treasury");
+          const liveVault = buildLiveVault(ws);
+          const liveChat: Chat = {
+            ...liveVault,
+            messages: [...liveVault.messages, ...(apiTreasury?.messages ?? [])],
+          };
+          setChats([liveChat, ...apiChats.filter((c) => c.id !== "treasury")]);
+          const live = buildLiveApproval(ws);
+          const apiTx1 = apiApprovals.find((a) => a.id === "tx1");
+          const mergedLive: Approval = apiTx1
+            ? {
+                ...live,
+                signed: Math.max(live.signed, apiTx1.signed),
+                youSigned: apiTx1.youSigned,
+                status: apiTx1.status,
+                proof: apiTx1.proof ?? live.proof,
+              }
+            : live;
+          setApprovals([mergedLive, ...apiApprovals.filter((a) => a.id !== "tx1")]);
+        } else {
+          const sj = await stateRes.json().catch(() => ({}));
+          setStateError(sj.error ?? "Failed to load live vault");
+          setChats(apiChats);
+          setApprovals(apiApprovals);
+        }
       } catch (e) {
-        if (!cancelled) setStateError(e instanceof Error ? e.message : "Failed to load live vault");
+        if (!cancelled) setStateError(e instanceof Error ? e.message : "Failed to load");
       }
     })();
     return () => {
@@ -121,53 +170,50 @@ export default function Wallet() {
     [chats, activeChat, view],
   );
 
-  // ---- approval actions ----
-  const signLocal = (id: string) =>
-    setApprovals((prev) =>
-      prev.map((t) => {
-        if (t.id !== id || t.youSigned) return t;
-        const signed = t.signed + 1;
-        return { ...t, signed, youSigned: true, status: signed >= t.threshold ? "ready" : "pending" };
-      }),
-    );
-
-  const signLive = useCallback(async (id: string) => {
-    setSigningId(id);
-    try {
-      const res = await fetch("/api/wallet/sign", { method: "POST" });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? "Signing failed");
-      setApprovals((prev) =>
-        prev.map((t) =>
-          t.id !== id
-            ? t
-            : {
-                ...t,
-                signed: t.threshold,
-                youSigned: true,
-                status: json.verified ? "ready" : "pending",
-                proof: {
-                  digest: json.authorization_digest,
-                  signature: json.aggregate_signature,
-                  groupKey: json.group_xonly_public_key,
-                  signers: json.signers,
-                  verified: json.verified,
-                },
-              },
-        ),
-      );
-    } catch (e) {
-      setStateError(e instanceof Error ? e.message : "Signing failed");
-    } finally {
-      setSigningId(null);
+  // Load the audit trail whenever the open chat changes.
+  useEffect(() => {
+    if (view !== "chat" || !active) {
+      setAudit({});
+      return;
     }
-  }, []);
+    void refreshAudit(active.id);
+  }, [view, active, refreshAudit]);
 
-  const onSign = (id: string) => {
-    const a = approvals.find((x) => x.id === id);
-    if (a?.live) void signLive(id);
-    else signLocal(id);
-  };
+  // ---- approval actions ----
+  // All signing is persisted server-side. For live approvals the route runs a
+  // real grouped HTSS round in Rust and stores the aggregate signature; for
+  // mock approvals it just records the signer. We take only the signing-result
+  // fields back so the live approval keeps its richer display values.
+  const onSign = useCallback(
+    async (id: string) => {
+      setSigningId(id);
+      try {
+        const res = await fetch(`/api/approvals/${id}/sign`, { method: "POST" });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error ?? "Signing failed");
+        const updated = json.approval as Approval;
+        setApprovals((prev) =>
+          prev.map((t) =>
+            t.id !== id
+              ? t
+              : {
+                  ...t,
+                  signed: updated.signed,
+                  youSigned: updated.youSigned,
+                  status: updated.status,
+                  proof: updated.proof ?? t.proof,
+                },
+          ),
+        );
+        if (active) void refreshAudit(active.id);
+      } catch (e) {
+        setStateError(e instanceof Error ? e.message : "Signing failed");
+      } finally {
+        setSigningId(null);
+      }
+    },
+    [active, refreshAudit],
+  );
   const onReject = (id: string) =>
     setApprovals((prev) => prev.map((t) => (t.id === id ? { ...t, status: "rejected" } : t)));
   const onBroadcast = (id: string) =>
@@ -241,19 +287,22 @@ export default function Wallet() {
     }
     const cid = activeChat;
     setDraft("");
-    setChats((prev) =>
-      prev.map((c) =>
-        c.id !== cid
-          ? c
-          : {
-              ...c,
-              messages: [
-                ...c.messages,
-                { id: `m${Date.now()}`, who: "Dana Klein", handle: "npub1dk…cfo", initials: "DK", color: C.sand, time: "now", text, signed: false, zaps: "" },
-              ],
-            },
-      ),
-    );
+    void (async () => {
+      const res = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chatId: cid, text }),
+      });
+      if (!res.ok) {
+        setStateError(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "Message failed");
+        return;
+      }
+      const { message } = (await res.json()) as { message: ChatMessage };
+      setChats((prev) =>
+        prev.map((c) => (c.id === cid ? { ...c, messages: [...c.messages, message] } : c)),
+      );
+      void refreshAudit(cid);
+    })();
   };
   const submitSend = () => {
     const amt = parseFloat(sendForm.amount);
@@ -268,23 +317,46 @@ export default function Wallet() {
     const cid = activeChat;
     const module = sendForm.module;
     setSendForm({ open: false, module: "Bitcoin mainnet", dest: "", amount: "" });
-    setApprovals((prev) => [
-      { id: `tx${Date.now()}`, kind: "send", title: `Transfer · ${module}`, dest: destShort, destLabel: module, btc: amt.toFixed(2), usd, vault: chat.name, time: "just now", policy, threshold, total: threshold, signed: 0, youSigned: false, status: "pending" },
-      ...prev,
-    ]);
-    setChats((prev) =>
-      prev.map((c) =>
-        c.id !== cid
-          ? c
-          : {
-              ...c,
-              messages: [
-                ...c.messages,
-                { id: `m${Date.now()}`, who: "Dana Klein", handle: "npub1dk…cfo", initials: "DK", color: C.sand, time: "now", text: `Requested a transfer — ${amt} BTC to ${destShort} on ${module}. Needs a ${policy} quorum — please review and sign in Approvals.`, signed: false, zaps: "" },
-              ],
-            },
-      ),
-    );
+    const proposal: Approval = {
+      id: `tx${Date.now()}`,
+      kind: "send",
+      title: `Transfer · ${module}`,
+      dest: destShort,
+      destLabel: module,
+      btc: amt.toFixed(2),
+      usd,
+      vault: chat.name,
+      time: "just now",
+      policy,
+      threshold,
+      total: threshold,
+      signed: 0,
+      youSigned: false,
+      status: "pending",
+    };
+    const announce = `Requested a transfer — ${amt} BTC to ${destShort} on ${module}. Needs a ${policy} quorum — please review and sign in Approvals.`;
+    void (async () => {
+      const res = await fetch("/api/approvals", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(proposal),
+      });
+      const created = res.ok ? ((await res.json()) as { approval: Approval }).approval : proposal;
+      setApprovals((prev) => [created, ...prev]);
+
+      const mres = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chatId: cid, text: announce }),
+      });
+      if (mres.ok) {
+        const { message } = (await mres.json()) as { message: ChatMessage };
+        setChats((prev) =>
+          prev.map((c) => (c.id === cid ? { ...c, messages: [...c.messages, message] } : c)),
+        );
+      }
+      void refreshAudit(cid);
+    })();
   };
 
   // ---- derived values ----
