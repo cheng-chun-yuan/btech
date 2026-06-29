@@ -37,8 +37,11 @@ export function validate(db: DB, ev: SubledgerEvent): ValidationResult {
   if (!ev.timestamp) return { ok: false, reason: "missing timestamp" };
   if (!ev.asset) return { ok: false, reason: "missing asset" };
 
-  const qty = Number(ev.qty);
-  if (!(qty > 0)) return { ok: false, reason: "qty must be > 0" };
+  // PERIODEND_REVALUE has no qty move — it remeasures existing lots.
+  if (ev.type !== "PERIODEND_REVALUE") {
+    const qty = Number(ev.qty);
+    if (!(qty > 0)) return { ok: false, reason: "qty must be > 0" };
+  }
 
   if (ON_CHAIN_TYPES.has(ev.type) && !ev.tx_hash) {
     return { ok: false, reason: "on-chain move requires tx_hash" };

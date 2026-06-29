@@ -5,14 +5,16 @@
 import {
   parseDecimal,
   formatDecimal,
+  rescale,
   mulDivRound,
   QTY_SCALE,
   TWD_INTERNAL_SCALE,
+  TWD_POSTING_SCALE,
   type Minor,
 } from "./money";
 import { getJournalEntries, type DB } from "./store";
 import { classify } from "./classify";
-import { DEFAULT_COA_CODES } from "./types";
+import { DEFAULT_COA_CODES, type CoaKey } from "./types";
 
 const ZERO = BigInt(0);
 
@@ -168,6 +170,50 @@ export function lotDisposals(db: DB): DisposalRow[] {
       gain_loss: formatDecimal(proceeds - agg.carrying, TWD_INTERNAL_SCALE),
       cost_flow: ev ? classify(db, ev.asset).cost_flow : "FIFO",
     });
+  }
+  return out;
+}
+
+// ---- ③ pnl_detail ----------------------------------------------------------
+
+export interface PnlRow {
+  period: string;
+  asset: string;
+  type: "disposal" | "impairment" | "reversal" | "fx" | "settlement" | "reval";
+  amount: string; // signed, internal scale (gain +, loss/impairment -)
+  op_noop: "op" | "non-op";
+  event_id: string;
+}
+
+// P&L accounts -> result type + operating classification. op/non-op is a policy
+// default (configurable); gains are CR-positive, losses DR-negative.
+const PNL_MAP: Partial<Record<CoaKey, { type: PnlRow["type"]; op: PnlRow["op_noop"] }>> = {
+  disposal_gain: { type: "disposal", op: "non-op" },
+  disposal_loss: { type: "disposal", op: "non-op" },
+  impairment_loss: { type: "impairment", op: "op" },
+  impairment_reversal_gain: { type: "reversal", op: "op" },
+  fx_gain_loss: { type: "fx", op: "non-op" },
+};
+
+export function pnlDetail(db: DB): PnlRow[] {
+  const getAsset = db.prepare("SELECT asset FROM sl_event WHERE event_id=?");
+  const out: PnlRow[] = [];
+  for (const e of getJournalEntries(db)) {
+    const evAsset = (getAsset.get(e.event_id) as { asset: string } | undefined)?.asset ?? "";
+    for (const l of e.lines) {
+      const map = PNL_MAP[l.account];
+      if (!map) continue;
+      const magnitude = rescale(parseDecimal(l.amount_twd, TWD_POSTING_SCALE), TWD_POSTING_SCALE, TWD_INTERNAL_SCALE);
+      const signed = l.dr_cr === "CR" ? magnitude : -magnitude; // CR gain +, DR loss -
+      out.push({
+        period: e.period,
+        asset: l.asset ?? evAsset,
+        type: map.type,
+        amount: formatDecimal(signed, TWD_INTERNAL_SCALE),
+        op_noop: map.op,
+        event_id: e.event_id,
+      });
+    }
   }
   return out;
 }

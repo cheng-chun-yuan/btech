@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { journalRows, positions, lotDisposals } from "./outputs";
+import { journalRows, positions, lotDisposals, pnlDetail } from "./outputs";
 import { ingest } from "./engine";
 import { openTestSubledgerDb, insertPrice, type DB } from "./store";
 import { DEFAULT_COA_CODES, type SubledgerEvent } from "./types";
@@ -62,5 +62,27 @@ describe("outputs ④ lot_disposal", () => {
     expect(d.proceeds).toBe("3000000.0000");
     expect(d.gain_loss).toBe("164000.0000");
     expect(d.cost_flow).toBe("FIFO");
+  });
+});
+
+describe("outputs ③ pnl_detail", () => {
+  it("reports disposal, impairment and reversal with signed amounts", () => {
+    const db = openTestSubledgerDb();
+    seed(db);
+    insertPrice(db, { asset: "BTC", date: "2026-06-30", source: "t", market: "CB", price_usd: "40000", usd_twd_rate: "31.00" });
+    ingest(db, buy("b1", "2026-06-01"));
+    ingest(db, buy("b2", "2026-06-05"));
+    ingest(db, sell15()); // disposal gain 164,000
+    // remaining b2 = 0.5 BTC; recoverable 0.5*40000*31.00 = 620,000 < carrying 961,000 -> impair 341,000
+    ingest(db, { event_id: "pe1", type: "PERIODEND_REVALUE", timestamp: "2026-06-30T23:59:59Z", wallet_id: "w", asset: "BTC", qty: "0" });
+
+    const pnl = pnlDetail(db);
+    const disp = pnl.find((p) => p.type === "disposal" && p.event_id === "s1")!;
+    expect(disp.amount).toBe("164000.0000");
+    expect(disp.asset).toBe("BTC");
+    expect(disp.period).toBe("2026-06");
+
+    const imp = pnl.find((p) => p.type === "impairment" && p.event_id === "pe1")!;
+    expect(imp.amount).toBe("-341000.0000");
   });
 });

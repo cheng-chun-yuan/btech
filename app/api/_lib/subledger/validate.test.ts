@@ -75,4 +75,25 @@ describe("validate (§8, INV-10)", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/price/i);
   });
+
+  it("accepts PERIODEND_REVALUE with no qty move (operates on existing lots)", () => {
+    const db = openTestSubledgerDb();
+    insertPrice(db, {
+      asset: "BTC",
+      date: "2026-06-30",
+      source: "test",
+      market: "Coinbase",
+      price_usd: "50000",
+      usd_twd_rate: "31.25",
+    });
+    const pe: SubledgerEvent = {
+      event_id: "pe1",
+      type: "PERIODEND_REVALUE",
+      timestamp: "2026-06-30T23:59:59Z",
+      wallet_id: "w",
+      asset: "BTC",
+      qty: "0",
+    };
+    expect(validate(db, pe).ok).toBe(true);
+  });
 });

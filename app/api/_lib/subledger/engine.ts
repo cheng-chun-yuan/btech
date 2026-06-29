@@ -24,7 +24,7 @@ import {
 } from "./store";
 import { classify } from "./classify";
 import { validate } from "./validate";
-import { createLot, consumeLots } from "./lots";
+import { createLot, consumeLots, getOpenLots, updateAccumImpairment } from "./lots";
 import type { AssetConfig, JournalEntry, JournalLine, SubledgerEvent } from "./types";
 
 export interface IngestResult {
@@ -116,6 +116,58 @@ function dispose(db: DB, ev: SubledgerEvent, cfg: AssetConfig): { lines: Journal
   return { lines };
 }
 
+/**
+ * PERIOD_END (§5) for INTANGIBLE_IAS38 + COST_MODEL. Per lot: recoverable uses
+ * the LOCKED acquisition fx rate (non-monetary, INV-7), never the period-end
+ * rate. Impair on the way down; reverse only previously-impaired amounts, capped
+ * at original cost — no upside above cost before disposal (INV-8).
+ */
+function periodEndRevalue(db: DB, ev: SubledgerEvent): { lines: JournalLine[] } {
+  const date = dateOf(ev.timestamp);
+  const price = getPrice(db, ev.asset, date)!; // validated present
+  const priceUsd = parseDecimal(price.price_usd, PRICE_SCALE);
+  const scale = QTY_SCALE[ev.asset];
+
+  let totalImpairment = ZERO;
+  let totalReversal = ZERO;
+  for (const lot of getOpenLots(db, ev.wallet_id, ev.asset)) {
+    const remainingQty = parseDecimal(lot.remaining_qty, scale);
+    const recoverable = valueTwd(
+      remainingQty,
+      scale,
+      priceUsd,
+      parseDecimal(lot.acquire_fx_rate, FX_SCALE), // LOCKED at acquisition (INV-7)
+    );
+    const remainingCost = parseDecimal(lot.remaining_cost_twd, TWD_INTERNAL_SCALE);
+    const accumImp = parseDecimal(lot.accum_impairment_twd, TWD_INTERNAL_SCALE);
+    const carrying = remainingCost - accumImp;
+
+    if (recoverable < carrying) {
+      const imp = carrying - recoverable;
+      totalImpairment += imp;
+      updateAccumImpairment(db, lot.lot_id, formatDecimal(accumImp + imp, TWD_INTERNAL_SCALE));
+    } else if (accumImp > ZERO && recoverable > carrying) {
+      const cap = recoverable < remainingCost ? recoverable : remainingCost; // min(recoverable, cost)
+      const reversal = cap - carrying; // <= accumImp by construction
+      totalReversal += reversal;
+      updateAccumImpairment(db, lot.lot_id, formatDecimal(accumImp - reversal, TWD_INTERNAL_SCALE));
+    }
+  }
+
+  const lines: JournalLine[] = [];
+  if (totalImpairment > ZERO) {
+    const amt = post(totalImpairment);
+    lines.push({ dr_cr: "DR", account: "impairment_loss", amount_twd: amt, asset: ev.asset });
+    lines.push({ dr_cr: "CR", account: "accum_impairment", amount_twd: amt, asset: ev.asset });
+  }
+  if (totalReversal > ZERO) {
+    const amt = post(totalReversal);
+    lines.push({ dr_cr: "DR", account: "accum_impairment", amount_twd: amt, asset: ev.asset });
+    lines.push({ dr_cr: "CR", account: "impairment_reversal_gain", amount_twd: amt, asset: ev.asset });
+  }
+  return { lines };
+}
+
 type Builder = (db: DB, ev: SubledgerEvent, cfg: AssetConfig) => { lines: JournalLine[] };
 
 const BUILDERS: Partial<Record<SubledgerEvent["type"], Builder>> = {
@@ -123,6 +175,7 @@ const BUILDERS: Partial<Record<SubledgerEvent["type"], Builder>> = {
   ONRAMP: (db, ev) => acquire(db, ev),
   SELL: dispose,
   OFFRAMP: dispose,
+  PERIODEND_REVALUE: (db, ev) => periodEndRevalue(db, ev),
 };
 
 export function ingest(db: DB, ev: SubledgerEvent): IngestResult {
@@ -143,6 +196,13 @@ export function ingest(db: DB, ev: SubledgerEvent): IngestResult {
   }
 
   const { lines } = builder(db, ev, cfg);
+  // A processed event with nothing to book (e.g. a period-end with no impairment
+  // or reversal) is a legitimate no-op, not a quarantine.
+  if (lines.length === 0) {
+    insertEvent(db, ev, "posted");
+    return { posted: false, reason: "no measurable change" };
+  }
+
   const entry: JournalEntry = {
     je_id: `je-${ev.event_id}`,
     event_id: ev.event_id,

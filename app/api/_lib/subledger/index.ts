@@ -19,9 +19,11 @@ export {
   journalRows,
   positions,
   lotDisposals,
+  pnlDetail,
   toCsv,
   type JournalRow,
   type PositionRow,
   type DisposalRow,
+  type PnlRow,
 } from "./outputs";
 export * from "./types";

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { createLot, consumeLots, getLot } from "./lots";
+import { createLot, consumeLots, getLot, updateAccumImpairment } from "./lots";
 import { openTestSubledgerDb } from "./store";
 import { formatDecimal, TWD_INTERNAL_SCALE } from "./money";
 
@@ -45,6 +45,35 @@ describe("lots FIFO consumption (INV-9)", () => {
 
     expect(getLot(db, "buyA")!.remaining_qty).toBe("0.00000000");
     expect(getLot(db, "buyB")!.remaining_qty).toBe("0.50000000");
+  });
+
+  it("nets proportional impairment from carrying on partial consumption (INV-8)", () => {
+    const db = openTestSubledgerDb();
+    createLot(db, {
+      event_id: "L",
+      wallet_id: "w",
+      asset: "BTC",
+      acquire_date: "2026-06-01",
+      acquire_fx_rate: "31.25",
+      qty: "2",
+      cost_twd: "4000000",
+    });
+    updateAccumImpairment(db, "L", "1000000"); // 1,000,000 impairment over 2 BTC
+
+    // consume 1 BTC: cost portion 2,000,000 net of impairment portion 500,000
+    const r = consumeLots(db, {
+      disposal_event_id: "d",
+      wallet_id: "w",
+      asset: "BTC",
+      qty: "1",
+      cost_flow: "FIFO",
+    });
+    expect(formatDecimal(r.carrying_twd, TWD_INTERNAL_SCALE)).toBe("1500000.0000");
+
+    const lot = getLot(db, "L")!;
+    expect(lot.remaining_qty).toBe("1.00000000");
+    expect(lot.remaining_cost_twd).toBe("2000000.0000");
+    expect(lot.accum_impairment_twd).toBe("500000.0000");
   });
 
   it("throws when quantity exceeds open lots", () => {

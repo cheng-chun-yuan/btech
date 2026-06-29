@@ -79,6 +79,20 @@ export function getLot(db: DB, lotId: string): Lot | undefined {
   return row ? { ...row } : undefined;
 }
 
+/** Open lots (remaining_qty > 0) for a wallet+asset, oldest first. */
+export function getOpenLots(db: DB, walletId: string, asset: string): Lot[] {
+  const scale = qtyScaleOf(asset);
+  const rows = db
+    .prepare("SELECT * FROM sl_lot WHERE wallet_id=? AND asset=? ORDER BY created_at ASC")
+    .all(walletId, asset) as LotRow[];
+  return rows.filter((r) => parseDecimal(r.remaining_qty, scale) > ZERO).map((r) => ({ ...r }));
+}
+
+/** Set a lot's accumulated impairment (period-end measurement). */
+export function updateAccumImpairment(db: DB, lotId: string, accumImpairmentTwd: string): void {
+  db.prepare("UPDATE sl_lot SET accum_impairment_twd=? WHERE lot_id=?").run(accumImpairmentTwd, lotId);
+}
+
 export interface ConsumedLot {
   lot_id: string;
   qty: string;
@@ -114,7 +128,7 @@ export function consumeLots(db: DB, input: ConsumeInput): ConsumeResult {
   const consumed: ConsumedLot[] = [];
   let carrying = ZERO;
   const updateLot = db.prepare(
-    "UPDATE sl_lot SET remaining_qty=?, remaining_cost_twd=? WHERE lot_id=?",
+    "UPDATE sl_lot SET remaining_qty=?, remaining_cost_twd=?, accum_impairment_twd=? WHERE lot_id=?",
   );
   const insCons = db.prepare(
     `INSERT INTO sl_lot_consumption (disposal_event_id, lot_id, qty, carrying_twd, created_at)
@@ -129,18 +143,22 @@ export function consumeLots(db: DB, input: ConsumeInput): ConsumeResult {
 
       const take = remaining < need ? remaining : need;
       const remainingCost = parseDecimal(row.remaining_cost_twd, TWD_INTERNAL_SCALE);
-      // Allocate the lot's remaining cost basis proportionally. When take ==
-      // remaining (last slice), this returns the exact residual: no drift, so
-      // subledger basis == GL credit (INV-4). Net of impairment: M2 adds the
-      // proportional accum_impairment deduction.
-      const carryNet = mulDivRound(remainingCost, take, remaining);
+      const accumImp = parseDecimal(row.accum_impairment_twd, TWD_INTERNAL_SCALE);
+      // Allocate the lot's remaining cost AND its accumulated impairment
+      // proportionally. carrying = cost portion net of impairment portion. When
+      // take == remaining (last slice), each returns the exact residual: no
+      // drift, so subledger basis == GL credit (INV-4).
+      const costPortion = mulDivRound(remainingCost, take, remaining);
+      const impPortion = mulDivRound(accumImp, take, remaining);
+      const carryNet = costPortion - impPortion;
       carrying += carryNet;
 
       const takeStr = formatDecimal(take, scale);
       const carryStr = formatDecimal(carryNet, TWD_INTERNAL_SCALE);
       updateLot.run(
         formatDecimal(remaining - take, scale),
-        formatDecimal(remainingCost - carryNet, TWD_INTERNAL_SCALE),
+        formatDecimal(remainingCost - costPortion, TWD_INTERNAL_SCALE),
+        formatDecimal(accumImp - impPortion, TWD_INTERNAL_SCALE),
         row.lot_id,
       );
       insCons.run(input.disposal_event_id, row.lot_id, takeStr, carryStr, ++consSeq);
