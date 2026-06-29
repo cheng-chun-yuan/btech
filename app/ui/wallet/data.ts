@@ -256,12 +256,15 @@ export function buildLiveApproval(state: WalletState): Approval {
   const threshold = groups.reduce((a, g) => a + g.required, 0);
   const total = groups.reduce((a, g) => a + g.total, 0);
   const btc = 2.4;
+  const recipientAddress = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
   return {
     id: "tx1",
     kind: "send",
     title: "Vendor payment — Blockstream",
-    dest: "bcrt1q…f4k2",
+    dest: "bcrt1q…f3t4",
     destLabel: "Whitelisted vendor",
+    recipientAddress,
+    amountSats: Math.round(btc * 1e8),
     btc: btc.toFixed(2),
     usd: Math.round(btc * BTC_USD).toLocaleString("en-US"),
     vault: "#treasury-ops",

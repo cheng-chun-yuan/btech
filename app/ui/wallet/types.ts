@@ -84,6 +84,10 @@ export type Approval = {
   status: ApprovalStatus;
   /** Set when this approval is bound to the live DKGKit vault. */
   live?: boolean;
+  /** Full destination address (not the truncated `dest`); signed into the digest. */
+  recipientAddress?: string;
+  /** Amount in satoshis; signed into the authorization digest. */
+  amountSats?: number;
   /** Real cryptographic result, populated after a live signing round. */
   proof?: SigningProof;
 };

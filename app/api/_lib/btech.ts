@@ -94,6 +94,31 @@ export function runDemo(): Promise<DemoReport> {
   return runBtech(["--json"]) as Promise<DemoReport>;
 }
 
+export type SignApprovalParams = {
+  recipient: string;
+  amountSats: number;
+  nonce: string;
+  memo: string;
+};
+
+/**
+ * Sign a real payment authorization: the aggregate signature is bound to the
+ * approval's actual recipient + amount + id, not a fixed demo digest.
+ */
+export function runSignApproval(p: SignApprovalParams): Promise<DemoReport> {
+  return runBtech([
+    "--sign-approval-json",
+    "--recipient",
+    p.recipient,
+    "--amount",
+    String(Math.max(0, Math.round(p.amountSats))),
+    "--nonce",
+    p.nonce,
+    "--memo",
+    p.memo,
+  ]) as Promise<DemoReport>;
+}
+
 export function runSessionProof(sessionId: string): Promise<SessionProofReport> {
   const id = sessionId.trim().length > 0 ? sessionId.trim() : "btech-session-proof";
   return runBtech(["--session-proof-json", "--session-id", id]) as Promise<SessionProofReport>;

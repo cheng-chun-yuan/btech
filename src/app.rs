@@ -87,6 +87,53 @@ impl WalletApp {
         })
     }
 
+    /// Sign a caller-supplied payment authorization (real recipient + amount),
+    /// binding the aggregate signature to the actual approval rather than a fixed
+    /// demo digest. Runs DKG, derives the receive address, and signs with a valid
+    /// grouped signer set.
+    pub fn sign_payment(
+        &mut self,
+        nonce: impl Into<String>,
+        recipient: impl Into<String>,
+        amount_sats: u64,
+        memo: impl Into<String>,
+    ) -> anyhow::Result<DemoReport> {
+        self.vault.connect_transport()?;
+        self.vault.run_htss_dkg()?;
+        anyhow::ensure!(
+            self.vault.local_share_count() == self.vault.participant_count(),
+            "not every participant produced a local share"
+        );
+
+        let address = self.vault.derive_receive_address(0, 0, 0)?;
+        let approval = ApprovalRequest::payment(
+            nonce,
+            self.vault.network.clone(),
+            recipient,
+            amount_sats,
+            memo,
+        );
+        self.repository.save_approval(approval.clone());
+
+        let signer_set = demo_valid_signer_set()?;
+        let signing = self
+            .vault
+            .sign_approval("payment-signing", &approval, signer_set)?;
+
+        Ok(DemoReport {
+            vault_id: self.vault.vault_id.clone(),
+            network: self.vault.network.clone(),
+            group_xonly_public_key: self.vault.group_xonly_public_key_hex()?,
+            receive_path: address.path.display_path(),
+            receive_address: address.address,
+            signers: signing.signer_ids,
+            authorization_digest: signing.digest_hex,
+            aggregate_signature: signing.signature_hex,
+            verified: signing.verified,
+            remaining_relay_events: self.vault.remaining_relay_events(),
+        })
+    }
+
     pub fn repository(&self) -> &InMemoryRepository {
         &self.repository
     }

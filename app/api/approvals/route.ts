@@ -22,6 +22,8 @@ function ensureLiveApproval(db: ReturnType<typeof getDb>) {
       vault: "#treasury-ops",
       title: "Vendor payment — Blockstream",
       live: true,
+      recipientAddress: "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+      amountSats: 240000000,
       threshold: 6,
       total: 10,
       signed: 1,

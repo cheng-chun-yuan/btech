@@ -4,7 +4,7 @@ import { cookies } from "next/headers";
 import { getDb } from "../../../_lib/db";
 import { getSessionUser, SESSION_COOKIE } from "../../../_lib/auth";
 import { recordAudit, resolveChatId } from "../../../_lib/audit";
-import { runDemo } from "../../../_lib/btech";
+import { runSignApproval } from "../../../_lib/btech";
 import type { Approval, SigningProof } from "../../../../ui/wallet/types";
 
 export const runtime = "nodejs";
@@ -26,8 +26,17 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
   let aggregate: string | null = null;
   let proof: SigningProof | undefined;
   if (row.is_live || approval.live) {
-    // Live vault: run a real grouped HTSS signing round in Rust.
-    const report = await runDemo();
+    // Live vault: run a real grouped HTSS round in Rust, signing the approval's
+    // actual recipient + amount so the signature is bound to this transaction.
+    const recipient = approval.recipientAddress ?? approval.dest ?? "";
+    const amountSats =
+      approval.amountSats ?? Math.round(parseFloat(approval.btc ?? "0") * 1e8);
+    const report = await runSignApproval({
+      recipient,
+      amountSats,
+      nonce: approval.id,
+      memo: approval.title,
+    });
     aggregate = report.aggregate_signature;
     proof = {
       digest: report.authorization_digest,
