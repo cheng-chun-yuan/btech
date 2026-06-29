@@ -10,6 +10,7 @@ import {
   type AssetConfig,
   type JournalEntry,
   type JournalLine,
+  type MonetaryItem,
   type PolicyParam,
   type PricePoint,
   type SubledgerEvent,
@@ -308,6 +309,57 @@ export function insertException(
   db.prepare(
     "INSERT INTO sl_exception (kind, ref, detail, created_at) VALUES (?, ?, ?, ?)",
   ).run(kind, ref, detail, ++excSeq);
+}
+
+export function insertMonetaryItem(db: DB, item: MonetaryItem): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO sl_monetary_item (doc_no, kind, ccy, orig_amount, carrying_twd, open)
+     VALUES (@doc_no, @kind, @ccy, @orig_amount, @carrying_twd, @open)`,
+  ).run({
+    doc_no: item.doc_no,
+    kind: item.kind,
+    ccy: item.ccy,
+    orig_amount: item.orig_amount,
+    carrying_twd: item.carrying_twd,
+    open: item.open ? 1 : 0,
+  });
+}
+
+interface MonetaryRow {
+  doc_no: string;
+  kind: MonetaryItem["kind"];
+  ccy: string;
+  orig_amount: string;
+  carrying_twd: string;
+  open: number;
+}
+
+export function getMonetaryItem(db: DB, docNo: string): MonetaryItem | undefined {
+  const row = db.prepare("SELECT * FROM sl_monetary_item WHERE doc_no=?").get(docNo) as
+    | MonetaryRow
+    | undefined;
+  return row ? { ...row, open: row.open === 1 } : undefined;
+}
+
+/** Open monetary items in a currency, oldest doc first. */
+export function getOpenMonetaryItems(db: DB, ccy: string): MonetaryItem[] {
+  const rows = db
+    .prepare("SELECT * FROM sl_monetary_item WHERE ccy=? AND open=1 ORDER BY doc_no ASC")
+    .all(ccy) as MonetaryRow[];
+  return rows.map((r) => ({ ...r, open: r.open === 1 }));
+}
+
+export function updateMonetaryItem(
+  db: DB,
+  docNo: string,
+  carryingTwd: string,
+  open: boolean,
+): void {
+  db.prepare("UPDATE sl_monetary_item SET carrying_twd=?, open=? WHERE doc_no=?").run(
+    carryingTwd,
+    open ? 1 : 0,
+    docNo,
+  );
 }
 
 interface JeRow {

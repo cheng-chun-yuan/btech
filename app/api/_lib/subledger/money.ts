@@ -17,6 +17,8 @@ export const TWD_POSTING_SCALE = 2;
 export const PRICE_SCALE = 8;
 /** USD/TWD rate precision in a PricePoint. */
 export const FX_SCALE = 6;
+/** Original-currency (USD) amount precision for monetary AR/AP items. */
+export const USD_SCALE = 2;
 /** Native quantity precision per asset (decimal places). */
 export const QTY_SCALE: Record<string, number> = {
   BTC: 8,

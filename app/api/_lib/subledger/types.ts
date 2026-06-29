@@ -36,6 +36,7 @@ export interface SubledgerEvent {
   /** Economic inputs supplied by the source system for some event types. */
   proceeds_twd?: string | null; // SELL / OFFRAMP bank proceeds
   settle_amount_usd?: string | null; // RECEIVE_SETTLE_AR / PAY_SUPPLIER value settled
+  cogs_twd?: string | null; // RECEIVE_NONCASH cost of goods sold
 }
 
 // ---- Classification & measurement config (§4, §10) -------------------------

@@ -19,12 +19,15 @@ const ON_CHAIN_TYPES = new Set<EventType>([
 /** Events that settle a monetary AR/AP — an invoice_no is mandatory. */
 const AR_AP_TYPES = new Set<EventType>(["RECEIVE_SETTLE_AR", "PAY_SUPPLIER"]);
 
-/** Acquisitions / revaluations measure fair value from a PricePoint at the date. */
+// Need a PricePoint at the date: acquisitions/revaluations measure fair value
+// from it; settlements read the USD/TWD rate from it.
 const PRICE_REQUIRED_TYPES = new Set<EventType>([
   "BUY",
   "ONRAMP",
   "RECEIVE_NONCASH",
   "RECEIVE_SETTLE_AR",
+  "PAY_SUPPLIER",
+  "GAS",
   "PERIODEND_REVALUE",
 ]);
 
