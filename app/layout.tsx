@@ -11,10 +11,11 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Browser extensions (Immersive Translate, Grammarly, ColorZilla, …) inject
+  // attributes onto <html> and <body> before hydration; suppressHydrationWarning
+  // on both elements silences those benign top-level attribute diffs.
   return (
-    <html lang="en">
-      {/* Browser extensions (Grammarly, ColorZilla, …) inject attributes onto
-          <body> before hydration; suppress that benign top-level attribute diff. */}
+    <html lang="en" suppressHydrationWarning>
       <body suppressHydrationWarning>{children}</body>
     </html>
   );
