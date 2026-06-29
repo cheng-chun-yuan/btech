@@ -1,0 +1,8 @@
+/target/
+/node_modules/
+/.next/
+/tsconfig.tsbuildinfo
+/.env*.local
+/design-import/
+/design-import-ditto/
+/artifacts/
