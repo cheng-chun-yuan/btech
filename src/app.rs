@@ -11,6 +11,7 @@ use crate::storage::InMemoryRepository;
 pub struct WalletApp {
     vault: VaultService,
     repository: InMemoryRepository,
+    ready: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,16 +40,28 @@ impl WalletApp {
         Ok(Self {
             vault,
             repository: InMemoryRepository::default(),
+            ready: false,
         })
     }
 
-    pub fn run_demo(&mut self) -> anyhow::Result<DemoReport> {
+    /// Connect transport and run DKG once. Idempotent: a long-lived service runs
+    /// the ceremony on the first call and reuses the finalized vault thereafter.
+    pub fn init(&mut self) -> anyhow::Result<()> {
+        if self.ready {
+            return Ok(());
+        }
         self.vault.connect_transport()?;
         self.vault.run_htss_dkg()?;
         anyhow::ensure!(
             self.vault.local_share_count() == self.vault.participant_count(),
             "not every participant produced a local share"
         );
+        self.ready = true;
+        Ok(())
+    }
+
+    pub fn run_demo(&mut self) -> anyhow::Result<DemoReport> {
+        self.init()?;
 
         let address = self.vault.derive_receive_address(0, 0, 0)?;
         let approval = ApprovalRequest::payment(
@@ -98,12 +111,7 @@ impl WalletApp {
         amount_sats: u64,
         memo: impl Into<String>,
     ) -> anyhow::Result<DemoReport> {
-        self.vault.connect_transport()?;
-        self.vault.run_htss_dkg()?;
-        anyhow::ensure!(
-            self.vault.local_share_count() == self.vault.participant_count(),
-            "not every participant produced a local share"
-        );
+        self.init()?;
 
         let address = self.vault.derive_receive_address(0, 0, 0)?;
         let approval = ApprovalRequest::payment(
@@ -132,6 +140,19 @@ impl WalletApp {
             verified: signing.verified,
             remaining_relay_events: self.vault.remaining_relay_events(),
         })
+    }
+
+    /// Vault info without running a signing round (DKG is run once via init).
+    pub fn vault_state(&mut self) -> anyhow::Result<serde_json::Value> {
+        self.init()?;
+        let address = self.vault.derive_receive_address(0, 0, 0)?;
+        Ok(serde_json::json!({
+            "vault_id": self.vault.vault_id,
+            "network": self.vault.network,
+            "group_xonly_public_key": self.vault.group_xonly_public_key_hex()?,
+            "receive_address": address.address,
+            "receive_path": address.path.display_path(),
+        }))
     }
 
     pub fn repository(&self) -> &InMemoryRepository {

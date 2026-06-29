@@ -101,17 +101,34 @@ export type SignApprovalParams = {
   memo: string;
 };
 
+/** Long-lived vault service URL (e.g. http://127.0.0.1:8787). When set, signing
+ * goes through `btech-vaultd` (DKG run once, fast) instead of spawning the CLI. */
+const VAULTD_URL = process.env.BTECH_VAULTD_URL?.replace(/\/$/, "");
+
 /**
  * Sign a real payment authorization: the aggregate signature is bound to the
- * approval's actual recipient + amount + id, not a fixed demo digest.
+ * approval's actual recipient + amount + id, not a fixed demo digest. Uses
+ * btech-vaultd over HTTP when available, otherwise falls back to the CLI.
  */
-export function runSignApproval(p: SignApprovalParams): Promise<DemoReport> {
+export async function runSignApproval(p: SignApprovalParams): Promise<DemoReport> {
+  const amountSats = Math.max(0, Math.round(p.amountSats));
+  if (VAULTD_URL) {
+    const res = await fetch(`${VAULTD_URL}/vault/sign`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ recipient: p.recipient, amountSats, nonce: p.nonce, memo: p.memo }),
+    });
+    if (!res.ok) {
+      throw new Error(`vaultd sign failed: ${res.status} ${await res.text().catch(() => "")}`);
+    }
+    return (await res.json()) as DemoReport;
+  }
   return runBtech([
     "--sign-approval-json",
     "--recipient",
     p.recipient,
     "--amount",
-    String(Math.max(0, Math.round(p.amountSats))),
+    String(amountSats),
     "--nonce",
     p.nonce,
     "--memo",
