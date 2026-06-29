@@ -25,6 +25,7 @@ import {
   insertEvent,
   insertException,
   insertJournalEntry,
+  getJournalEntries,
   type DB,
 } from "./store";
 import { classify } from "./classify";
@@ -409,6 +410,31 @@ const BUILDERS: Partial<Record<SubledgerEvent["type"], Builder>> = {
   RECEIVE_SETTLE_AR: receiveSettleAr,
   PERIODEND_REVALUE: periodEnd,
 };
+
+/**
+ * INV-3 correction: a posted entry is never edited or deleted. To correct it,
+ * post a reversing entry (DR/CR swapped) that references the original; both are
+ * retained. The caller then ingests the new, correct event separately.
+ */
+export function reverseEntry(db: DB, jeId: string, period?: string): JournalEntry {
+  const orig = getJournalEntries(db).find((e) => e.je_id === jeId);
+  if (!orig) throw new Error(`subledger: no entry ${jeId} to reverse`);
+  const rev: JournalEntry = {
+    je_id: `${jeId}-rev`,
+    event_id: orig.event_id,
+    period: period ?? orig.period,
+    status: "posted",
+    gaap: orig.gaap,
+    reverses: jeId,
+    lines: orig.lines.map((l) => ({
+      ...l,
+      dr_cr: l.dr_cr === "DR" ? "CR" : "DR",
+      memo: `reversal of ${jeId}`,
+    })),
+  };
+  insertJournalEntry(db, rev);
+  return rev;
+}
 
 export function ingest(db: DB, ev: SubledgerEvent): IngestResult {
   const v = validate(db, ev);

@@ -9,7 +9,8 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "subledger:demo": "tsx scripts/subledger-demo.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
@@ -23,6 +24,7 @@
     "@types/node": "24.10.0",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
+    "tsx": "^4.22.4",
     "typescript": "5.9.3",
     "vitest": "^4.1.9"
   }
