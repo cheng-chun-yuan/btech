@@ -7,17 +7,23 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
+    "better-sqlite3": "^12.11.1",
     "next": "16.2.9",
+    "nostr-tools": "^2.23.8",
     "react": "19.2.3",
     "react-dom": "19.2.3"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "24.10.0",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "^4.1.9"
   }
 }
