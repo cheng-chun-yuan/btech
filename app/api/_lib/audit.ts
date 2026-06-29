@@ -2,12 +2,14 @@ import { randomBytes } from "node:crypto";
 import type { DB } from "./db";
 
 export type AuditAction = "propose" | "sign" | "message" | "join";
+export type AuditOutcome = "success" | "failed";
 export type AuditEntry = {
   id: string;
   chat_id: string;
   actor_npub: string;
   actor_label: string;
   action: AuditAction;
+  outcome: AuditOutcome | null;
   detail: string | null;
   created_at: number;
 };
@@ -24,7 +26,14 @@ export function isMember(db: DB, chatId: string, npub: string): boolean {
 
 export function recordAudit(
   db: DB,
-  e: { chatId: string; actorNpub: string; actorLabel: string; action: AuditAction; detail?: string },
+  e: {
+    chatId: string;
+    actorNpub: string;
+    actorLabel: string;
+    action: AuditAction;
+    outcome?: AuditOutcome;
+    detail?: string;
+  },
 ): AuditEntry {
   const entry: AuditEntry = {
     id: `a_${randomBytes(6).toString("hex")}`,
@@ -32,12 +41,13 @@ export function recordAudit(
     actor_npub: e.actorNpub,
     actor_label: e.actorLabel,
     action: e.action,
+    outcome: e.outcome ?? null,
     detail: e.detail ?? null,
     created_at: Date.now(),
   };
   db.prepare(`
-    INSERT INTO audit_log (id, chat_id, actor_npub, actor_label, action, detail, created_at)
-    VALUES (@id, @chat_id, @actor_npub, @actor_label, @action, @detail, @created_at)
+    INSERT INTO audit_log (id, chat_id, actor_npub, actor_label, action, outcome, detail, created_at)
+    VALUES (@id, @chat_id, @actor_npub, @actor_label, @action, @outcome, @detail, @created_at)
   `).run(entry);
   addMember(db, e.chatId, e.actorNpub);
   return entry;

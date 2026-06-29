@@ -89,6 +89,7 @@ export async function POST(request: Request) {
     actorNpub: user.npub,
     actorLabel: user.label,
     action: "propose",
+    outcome: "success",
     detail: approval.title,
   });
 

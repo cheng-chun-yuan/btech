@@ -7,7 +7,7 @@ import type { Chat } from "../../ui/wallet/types";
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 export function migrate(db: DB): void {
   db.pragma("journal_mode = WAL");
@@ -83,6 +83,7 @@ export function migrate(db: DB): void {
       actor_npub TEXT NOT NULL,
       actor_label TEXT NOT NULL,
       action TEXT NOT NULL,
+      outcome TEXT,
       detail TEXT,
       created_at INTEGER NOT NULL
     );

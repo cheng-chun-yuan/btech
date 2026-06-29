@@ -46,6 +46,7 @@ type AuditEntryUI = {
   id: string;
   actor_label: string;
   action: "propose" | "sign" | "message" | "join";
+  outcome: "success" | "failed" | null;
   detail: string | null;
   created_at: number;
 };
@@ -474,6 +475,11 @@ export default function Wallet() {
             <ChatDetail
               chat={active}
               audit={audit}
+              pendingApprovals={approvals.filter(
+                (a) => a.vault === active.name && a.status === "pending",
+              )}
+              onSign={onSign}
+              signingId={signingId}
               showVault={showVault}
               toggleVault={toggleVault}
               wstate={wstate}
@@ -724,42 +730,22 @@ function LiveVaultCard({ wstate }: { wstate: WalletState }) {
   const { demo, session } = wstate;
   return (
     <div style={{ background: C.surface, border: "1px solid rgba(63,185,80,.25)", borderRadius: 16, padding: "20px 22px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16 }}>
         <span style={{ fontSize: 13, fontWeight: 600 }}>Live DKGKit vault</span>
         <span style={{ fontSize: 9.5, fontWeight: 600, letterSpacing: ".4px", color: C.green, background: "rgba(63,185,80,.12)", padding: "3px 8px", borderRadius: 20 }}>
-          {demo.verified ? "BIP340 VERIFIED" : "UNVERIFIED"}
+          {demo.verified ? "VERIFIED" : "UNVERIFIED"}
         </span>
         <span style={{ fontSize: 11, color: C.faint2 }}>{demo.network} · {session.htss.threshold}</span>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 26px", marginTop: 12 }}>
-        <KV label="Group x-only key" value={shortHex(demo.group_xonly_public_key)} />
-        <KV label="Receive address" value={shortHex(demo.receive_address)} />
-        <KV label="Receive path" value={demo.receive_path} />
-        <KV label="Aggregate signature" value={shortHex(demo.aggregate_signature)} />
+      <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px" }}>Receive address</div>
+      <div style={{ fontFamily: MONO, fontSize: 13, color: C.ink, marginTop: 4, wordBreak: "break-all" }}>
+        {demo.receive_address}
       </div>
-      <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
-        <Proof ok={session.invalid_htss_signer_set_rejected} text="Invalid signer set rejected" />
-        <Proof ok={session.high_rank_cannot_substitute_low_group} text="High-rank can't substitute a low-rank quorum" />
-        <Proof ok={session.tss.verified} text={`Base TSS ${session.tss.threshold} verified`} />
+      <div style={{ fontSize: 11.5, color: C.faint2, marginTop: 14, lineHeight: 1.5 }}>
+        Secured by a <span style={{ color: "#C5C9CE", fontFamily: MONO }}>{session.htss.threshold}</span> grouped
+        threshold. No single signer can move funds — every spend needs a quorum from each tier.
       </div>
     </div>
-  );
-}
-
-function KV({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px" }}>{label}</div>
-      <div style={{ fontFamily: MONO, fontSize: 12, color: "#C5C9CE", marginTop: 3, wordBreak: "break-all" }}>{value}</div>
-    </div>
-  );
-}
-
-function Proof({ ok, text }: { ok: boolean; text: string }) {
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, color: ok ? C.green : C.red, background: ok ? "rgba(63,185,80,.1)" : "rgba(240,97,109,.1)", padding: "5px 10px", borderRadius: 20 }}>
-      {ok ? "✓" : "✗"} {text}
-    </span>
   );
 }
 
@@ -829,6 +815,9 @@ function TabButton({ active, onClick, label, count }: { active: boolean; onClick
 function ChatDetail({
   chat,
   audit,
+  pendingApprovals,
+  onSign,
+  signingId,
   showVault,
   toggleVault,
   draft,
@@ -843,6 +832,9 @@ function ChatDetail({
 }: {
   chat: Chat;
   audit: { entries?: AuditEntryUI[]; restricted?: boolean };
+  pendingApprovals: Approval[];
+  onSign: (id: string) => void;
+  signingId: string | null;
   showVault: boolean;
   toggleVault: () => void;
   wstate: WalletState | null;
@@ -935,9 +927,79 @@ function ChatDetail({
         {showVault && (
           <VaultPanel chat={chat} setThreshold={setThreshold} removeKey={removeKey} proposeKey={proposeKey} />
         )}
-        <AuditPanel audit={audit} />
+        <div style={{ flex: "0 0 296px", display: "flex", flexDirection: "column", gap: 14, minHeight: 0 }}>
+          <OngoingProposals proposals={pendingApprovals} onSign={onSign} signingId={signingId} />
+          <AuditPanel audit={audit} />
+        </div>
       </div>
     </div>
+  );
+}
+
+// ===========================================================================
+// Ongoing proposals — pending approvals for this vault, awaiting a quorum
+// ===========================================================================
+
+function OngoingProposals({
+  proposals,
+  onSign,
+  signingId,
+}: {
+  proposals: Approval[];
+  onSign: (id: string) => void;
+  signingId: string | null;
+}) {
+  return (
+    <aside style={{ flex: "0 0 auto", background: C.surface, border: `1px solid ${C.line2}`, borderRadius: 16, padding: 16 }}>
+      <div style={{ fontSize: 13, fontWeight: 600 }}>Ongoing proposals</div>
+      <div style={{ fontSize: 10.5, color: C.faint, marginTop: 2, marginBottom: 12 }}>
+        Awaiting a signing quorum
+      </div>
+      {proposals.length === 0 ? (
+        <div style={{ fontSize: 11.5, color: C.faint2 }}>No proposals in flight.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {proposals.map((p) => {
+            const pct = Math.min(100, Math.round((p.signed / Math.max(1, p.threshold)) * 100));
+            return (
+              <div key={p.id} style={{ borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 600 }}>{p.title}</div>
+                {p.btc && (
+                  <div style={{ fontFamily: MONO, fontSize: 11, color: C.faint2, marginTop: 2 }}>
+                    {p.btc} BTC{p.dest ? ` → ${p.dest}` : ""}
+                  </div>
+                )}
+                <div style={{ marginTop: 8, height: 5, background: "rgba(255,255,255,.06)", borderRadius: 4, overflow: "hidden" }}>
+                  <div style={{ width: `${pct}%`, height: "100%", background: C.orange }} />
+                </div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 7 }}>
+                  <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint2 }}>
+                    {p.signed}/{p.threshold} signed
+                  </span>
+                  <button
+                    onClick={() => onSign(p.id)}
+                    disabled={p.youSigned || signingId === p.id}
+                    style={{
+                      background: p.youSigned ? "transparent" : C.orange,
+                      color: p.youSigned ? C.faint2 : C.bg,
+                      border: p.youSigned ? `1px solid ${C.line2}` : "none",
+                      borderRadius: 7,
+                      padding: "4px 10px",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      fontFamily: "inherit",
+                      cursor: p.youSigned ? "default" : "pointer",
+                    }}
+                  >
+                    {signingId === p.id ? "Signing…" : p.youSigned ? "You signed" : "Sign"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </aside>
   );
 }
 
@@ -1000,6 +1062,22 @@ function AuditPanel({ audit }: { audit: { entries?: AuditEntryUI[]; restricted?:
                 <div>
                   <span style={{ fontWeight: 600 }}>{e.actor_label}</span>{" "}
                   <span style={{ color: C.muted }}>{AUDIT_VERB[e.action] ?? e.action}</span>
+                  {e.outcome && (
+                    <span
+                      style={{
+                        marginLeft: 6,
+                        fontSize: 9,
+                        fontWeight: 600,
+                        letterSpacing: ".3px",
+                        padding: "1px 6px",
+                        borderRadius: 20,
+                        color: e.outcome === "success" ? C.green : C.red,
+                        background: e.outcome === "success" ? "rgba(63,185,80,.12)" : "rgba(240,97,109,.12)",
+                      }}
+                    >
+                      {e.outcome === "success" ? "✓ SUCCESS" : "✗ FAILED"}
+                    </span>
+                  )}
                 </div>
                 {e.detail && (
                   <div style={{ color: C.faint2, fontSize: 10.5, marginTop: 2, wordBreak: "break-word" }}>
