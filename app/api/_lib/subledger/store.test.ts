@@ -6,8 +6,10 @@ import {
   getAssetConfig,
   getPolicy,
   insertJournalEntry,
+  insertPrice,
+  getPrice,
 } from "./store";
-import type { JournalEntry } from "./types";
+import type { JournalEntry, PricePoint } from "./types";
 
 const SL_TABLES = [
   "sl_config",
@@ -58,6 +60,23 @@ describe("store config seed", () => {
     seedConfig(db); // re-seed must not duplicate
     const after = (db.prepare("SELECT COUNT(*) c FROM sl_config").get() as { c: number }).c;
     expect(after).toBe(before);
+  });
+});
+
+describe("store prices", () => {
+  it("round-trips a PricePoint by asset+date", () => {
+    const db = openTestSubledgerDb();
+    const pp: PricePoint = {
+      asset: "BTC",
+      date: "2026-06-01",
+      source: "test",
+      market: "Coinbase",
+      price_usd: "65000",
+      usd_twd_rate: "31.25",
+    };
+    insertPrice(db, pp);
+    expect(getPrice(db, "BTC", "2026-06-01")?.price_usd).toBe("65000");
+    expect(getPrice(db, "BTC", "2026-06-02")).toBeUndefined();
   });
 });
 

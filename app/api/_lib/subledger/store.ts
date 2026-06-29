@@ -9,7 +9,10 @@ import {
   DEFAULT_POLICY,
   type AssetConfig,
   type JournalEntry,
+  type JournalLine,
   type PolicyParam,
+  type PricePoint,
+  type SubledgerEvent,
 } from "./types";
 
 export type DB = Database.Database;
@@ -20,6 +23,7 @@ const SCHEMA = `
     classification TEXT NOT NULL,
     measurement TEXT NOT NULL,
     monetary INTEGER NOT NULL,
+    is_stablecoin INTEGER NOT NULL,
     redeemable_unconditional INTEGER NOT NULL,
     cost_flow TEXT NOT NULL
   );
@@ -56,7 +60,8 @@ const SCHEMA = `
     acquire_fx_rate TEXT NOT NULL,
     qty TEXT NOT NULL,
     remaining_qty TEXT NOT NULL,
-    unit_cost_twd TEXT NOT NULL,
+    cost_twd TEXT NOT NULL,
+    remaining_cost_twd TEXT NOT NULL,
     accum_impairment_twd TEXT NOT NULL,
     created_at INTEGER NOT NULL
   );
@@ -153,8 +158,8 @@ export function migrateSubledger(db: DB): void {
 export function seedConfig(db: DB): void {
   const insConfig = db.prepare(
     `INSERT OR IGNORE INTO sl_config
-       (asset, classification, measurement, monetary, redeemable_unconditional, cost_flow)
-     VALUES (@asset, @classification, @measurement, @monetary, @redeemable, @cost_flow)`,
+       (asset, classification, measurement, monetary, is_stablecoin, redeemable_unconditional, cost_flow)
+     VALUES (@asset, @classification, @measurement, @monetary, @is_stablecoin, @redeemable, @cost_flow)`,
   );
   const insPolicy = db.prepare(
     "INSERT OR IGNORE INTO sl_policy (key, value, status) VALUES (@key, @value, @status)",
@@ -166,6 +171,7 @@ export function seedConfig(db: DB): void {
         classification: c.classification,
         measurement: c.measurement,
         monetary: c.monetary ? 1 : 0,
+        is_stablecoin: c.is_stablecoin ? 1 : 0,
         redeemable: c.redeemable_unconditional ? 1 : 0,
         cost_flow: c.cost_flow,
       });
@@ -182,6 +188,7 @@ export function getAssetConfig(db: DB, asset: string): AssetConfig | undefined {
         classification: AssetConfig["classification"];
         measurement: AssetConfig["measurement"];
         monetary: number;
+        is_stablecoin: number;
         redeemable_unconditional: number;
         cost_flow: AssetConfig["cost_flow"];
       }
@@ -192,6 +199,7 @@ export function getAssetConfig(db: DB, asset: string): AssetConfig | undefined {
     classification: row.classification,
     measurement: row.measurement,
     monetary: row.monetary === 1,
+    is_stablecoin: row.is_stablecoin === 1,
     redeemable_unconditional: row.redeemable_unconditional === 1,
     cost_flow: row.cost_flow,
   };
@@ -201,6 +209,19 @@ export function getPolicy(db: DB, key: string): PolicyParam | undefined {
   return db.prepare("SELECT key, value, status FROM sl_policy WHERE key=?").get(key) as
     | PolicyParam
     | undefined;
+}
+
+export function insertPrice(db: DB, pp: PricePoint): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO sl_price (asset, date, source, market, price_usd, usd_twd_rate)
+     VALUES (@asset, @date, @source, @market, @price_usd, @usd_twd_rate)`,
+  ).run(pp);
+}
+
+export function getPrice(db: DB, asset: string, date: string): PricePoint | undefined {
+  return db
+    .prepare("SELECT * FROM sl_price WHERE asset=? AND date=?")
+    .get(asset, date) as PricePoint | undefined;
 }
 
 let jeSeq = 0;
@@ -241,6 +262,105 @@ export function insertJournalEntry(db: DB, entry: JournalEntry): void {
     }
   });
   tx();
+}
+
+let eventSeq = 0;
+let excSeq = 0;
+
+/** Persist the raw event with its disposition (posted | quarantined). */
+export function insertEvent(
+  db: DB,
+  ev: SubledgerEvent,
+  status: "posted" | "quarantined",
+  rejectReason?: string,
+): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO sl_event
+       (event_id, type, timestamp, wallet_id, asset, qty, counterparty, invoice_no,
+        tx_hash, fee_gas, proceeds_twd, settle_amount_usd, status, reject_reason, created_at)
+     VALUES (@event_id, @type, @timestamp, @wallet_id, @asset, @qty, @counterparty, @invoice_no,
+             @tx_hash, @fee_gas, @proceeds_twd, @settle_amount_usd, @status, @reject_reason, @created_at)`,
+  ).run({
+    event_id: ev.event_id,
+    type: ev.type,
+    timestamp: ev.timestamp,
+    wallet_id: ev.wallet_id,
+    asset: ev.asset,
+    qty: ev.qty,
+    counterparty: ev.counterparty ?? null,
+    invoice_no: ev.invoice_no ?? null,
+    tx_hash: ev.tx_hash ?? null,
+    fee_gas: ev.fee_gas ?? null,
+    proceeds_twd: ev.proceeds_twd ?? null,
+    settle_amount_usd: ev.settle_amount_usd ?? null,
+    status,
+    reject_reason: rejectReason ?? null,
+    created_at: ++eventSeq,
+  });
+}
+
+export function insertException(
+  db: DB,
+  kind: "rejected_event" | "recon_break" | "anomaly",
+  ref: string | null,
+  detail: string,
+): void {
+  db.prepare(
+    "INSERT INTO sl_exception (kind, ref, detail, created_at) VALUES (?, ?, ?, ?)",
+  ).run(kind, ref, detail, ++excSeq);
+}
+
+interface JeRow {
+  je_id: string;
+  event_id: string;
+  period: string;
+  status: JournalEntry["status"];
+  gaap: JournalEntry["gaap"];
+  reverses: string | null;
+}
+
+interface JlRow {
+  je_id: string;
+  dr_cr: JournalLine["dr_cr"];
+  account: JournalLine["account"];
+  amount_twd: string;
+  asset: string | null;
+  qty: string | null;
+  orig_ccy: string | null;
+  orig_amount: string | null;
+  tx_hash: string | null;
+  memo: string | null;
+}
+
+/** All posted/reversed entries with their lines, in insertion order. */
+export function getJournalEntries(db: DB): JournalEntry[] {
+  const jes = db
+    .prepare("SELECT * FROM sl_journal_entry ORDER BY created_at ASC")
+    .all() as JeRow[];
+  const lines = db
+    .prepare("SELECT * FROM sl_journal_line ORDER BY id ASC")
+    .all() as JlRow[];
+  return jes.map((je) => ({
+    je_id: je.je_id,
+    event_id: je.event_id,
+    period: je.period,
+    status: je.status,
+    gaap: je.gaap,
+    reverses: je.reverses,
+    lines: lines
+      .filter((l) => l.je_id === je.je_id)
+      .map((l) => ({
+        dr_cr: l.dr_cr,
+        account: l.account,
+        amount_twd: l.amount_twd,
+        asset: l.asset ?? undefined,
+        qty: l.qty ?? undefined,
+        orig_ccy: l.orig_ccy ?? undefined,
+        orig_amount: l.orig_amount ?? undefined,
+        tx_hash: l.tx_hash,
+        memo: l.memo ?? undefined,
+      })),
+  }));
 }
 
 /** In-memory subledger DB for tests: migrated + config-seeded. */

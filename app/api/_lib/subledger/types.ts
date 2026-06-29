@@ -53,6 +53,8 @@ export interface AssetConfig {
   classification: Classification;
   measurement: Measurement;
   monetary: boolean;
+  /** Has an issuer (e.g. USDC/USDT) vs native crypto (BTC/ETH) — drives §4. */
+  is_stablecoin: boolean;
   /** Issuer has NO redemption discretion -> drives classify() (§4). */
   redeemable_unconditional: boolean;
   cost_flow: CostFlow;
@@ -77,13 +79,19 @@ export interface Lot {
   wallet_id: string;
   asset: string;
   acquire_date: string; // YYYY-MM-DD
-  /** USD/TWD rate at acquisition, LOCKED (INV-7). Minor units at FX_SCALE. */
+  /** USD/TWD rate at acquisition, LOCKED (INV-7). Decimal string at FX_SCALE. */
   acquire_fx_rate: string;
   /** Quantities are decimal strings at the asset's native scale. */
   qty: string;
   remaining_qty: string;
-  /** TWD per unit at TWD_INTERNAL_SCALE. */
-  unit_cost_twd: string;
+  /**
+   * Total original cost basis in TWD (TWD_INTERNAL_SCALE) and the unconsumed
+   * remainder. Storing the total (not a unit cost) lets disposals allocate the
+   * basis proportionally with no rounding drift, so subledger basis == GL credit
+   * exactly (INV-4). unit_cost for display = cost_twd / qty.
+   */
+  cost_twd: string;
+  remaining_cost_twd: string;
   /** Accumulated impairment in TWD (>= 0), TWD_INTERNAL_SCALE. */
   accum_impairment_twd: string;
 }
@@ -203,6 +211,7 @@ export const DEFAULT_ASSET_CONFIGS: AssetConfig[] = [
     classification: "INTANGIBLE_IAS38",
     measurement: "COST_MODEL",
     monetary: false,
+    is_stablecoin: false,
     redeemable_unconditional: false,
     cost_flow: "FIFO",
   },
@@ -211,6 +220,7 @@ export const DEFAULT_ASSET_CONFIGS: AssetConfig[] = [
     classification: "INTANGIBLE_IAS38",
     measurement: "COST_MODEL",
     monetary: false,
+    is_stablecoin: false,
     redeemable_unconditional: false,
     cost_flow: "FIFO",
   },
@@ -219,6 +229,7 @@ export const DEFAULT_ASSET_CONFIGS: AssetConfig[] = [
     classification: "INTANGIBLE_IAS38",
     measurement: "COST_MODEL",
     monetary: false,
+    is_stablecoin: true,
     redeemable_unconditional: false,
     cost_flow: "FIFO",
   },
@@ -227,6 +238,7 @@ export const DEFAULT_ASSET_CONFIGS: AssetConfig[] = [
     classification: "INTANGIBLE_IAS38",
     measurement: "COST_MODEL",
     monetary: false,
+    is_stablecoin: true,
     redeemable_unconditional: false,
     cost_flow: "FIFO",
   },

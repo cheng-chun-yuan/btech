@@ -35,6 +35,21 @@ function pow10(n: number): bigint {
   return TEN ** BigInt(n);
 }
 
+/**
+ * round(a * b / c) with half-away-from-zero rounding. Used to allocate a lot's
+ * total cost basis proportionally across consumptions with no unit-cost drift
+ * (so the subledger basis and GL credits reconcile exactly — INV-4).
+ */
+export function mulDivRound(a: Minor, b: bigint, c: bigint): Minor {
+  const product = a * b;
+  const neg = product < ZERO;
+  const abs = neg ? -product : product;
+  const q = abs / c;
+  const r = abs % c;
+  const rounded = r * TWO >= c ? q + ONE : q;
+  return neg ? -rounded : rounded;
+}
+
 /** Integer divide with half-away-from-zero rounding (commercial rounding). */
 function roundDiv(value: bigint, divisor: bigint): bigint {
   const neg = value < ZERO;
