@@ -218,6 +218,103 @@ export function pnlDetail(db: DB): PnlRow[] {
   return out;
 }
 
+// ---- ⑤ reconciliation ------------------------------------------------------
+
+export interface ReconciliationRowOut {
+  period: string;
+  asset: string;
+  layer: string;
+  balance: string;
+  diff: string;
+  status: string;
+}
+
+export function reconciliationRows(db: DB): ReconciliationRowOut[] {
+  return db
+    .prepare("SELECT period, asset, layer, balance, diff, status FROM sl_reconciliation ORDER BY period, asset, layer")
+    .all() as ReconciliationRowOut[];
+}
+
+// ---- ⑨ exceptions ----------------------------------------------------------
+
+export interface ExceptionRow {
+  kind: string;
+  ref: string | null;
+  detail: string;
+}
+
+export function exceptions(db: DB): ExceptionRow[] {
+  return db
+    .prepare("SELECT kind, ref, detail FROM sl_exception ORDER BY id ASC")
+    .all() as ExceptionRow[];
+}
+
+// ---- ⑧ disclosures ---------------------------------------------------------
+
+export interface Disclosures {
+  holdings: PositionRow[];
+  policy: { key: string; value: string; status: string }[];
+  fx_lock_note: string;
+}
+
+export function disclosures(db: DB): Disclosures {
+  const policy = db.prepare("SELECT key, value, status FROM sl_policy ORDER BY key").all() as {
+    key: string;
+    value: string;
+    status: string;
+  }[];
+  return {
+    holdings: positions(db),
+    policy,
+    fx_lock_note:
+      "Crypto under IAS 38 is non-monetary: carrying is locked at the acquisition-date " +
+      "fx rate and is not retranslated at period end. Monetary USD AR/AP are retranslated " +
+      "at the closing rate (INV-7).",
+  };
+}
+
+// ---- ⑥ audit_pack ----------------------------------------------------------
+
+export interface AuditPack {
+  period: string;
+  policy_version: string;
+  journal: JournalRow[];
+  reconciliation: ReconciliationRowOut[];
+  lot_disposals: DisposalRow[];
+  tx_hash_index: Record<string, string[]>;
+  exceptions: ExceptionRow[];
+  immutable_log: { je_id: string; event_id: string; period: string }[];
+}
+
+export function auditPack(db: DB, period: string): AuditPack {
+  const policyVersion =
+    (db.prepare("SELECT value FROM sl_policy WHERE key='policy_version'").get() as { value: string } | undefined)?.value ?? "";
+  const journal = journalRows(db).filter((r) => r.date.startsWith(period));
+
+  // tx_hash -> event_ids that touched it
+  const txIndex: Record<string, string[]> = {};
+  for (const row of journal) {
+    if (!row.tx_hash) continue;
+    (txIndex[row.tx_hash] ??= []).push(row.event_id);
+  }
+  for (const k of Object.keys(txIndex)) txIndex[k] = Array.from(new Set(txIndex[k]));
+
+  const immutable = getJournalEntries(db)
+    .filter((e) => e.period === period)
+    .map((e) => ({ je_id: e.je_id, event_id: e.event_id, period: e.period }));
+
+  return {
+    period,
+    policy_version: policyVersion,
+    journal,
+    reconciliation: reconciliationRows(db).filter((r) => r.period === period),
+    lot_disposals: lotDisposals(db),
+    tx_hash_index: txIndex,
+    exceptions: exceptions(db),
+    immutable_log: immutable,
+  };
+}
+
 // ---- CSV serialization -----------------------------------------------------
 
 /** Serialize rows of flat string records to RFC-4180-ish CSV. */

@@ -92,34 +92,47 @@ function acquire(db: DB, ev: SubledgerEvent): { lines: JournalLine[] } {
   };
 }
 
+/**
+ * Disposal posting shared by SELL/OFFRAMP/GAS/settlement. Credits digital_asset
+ * at GROSS cost and debits accum_impairment to clear the contra (so both GL
+ * accounts zero out for a fully-disposed lot — INV-4). The delta vs proceeds is
+ * a disposal gain/loss, computed at posting scale so the entry balances exactly.
+ */
+function disposalLines(
+  ev: SubledgerEvent,
+  proceedsP: Minor,
+  grossP: Minor,
+  impairmentP: Minor,
+  debit: { account: JournalLine["account"]; memo?: string },
+): JournalLine[] {
+  const netP = grossP - impairmentP;
+  const deltaP = proceedsP - netP;
+  const tx = ev.tx_hash ?? null;
+  const lines: JournalLine[] = [
+    { dr_cr: "DR", account: debit.account, amount_twd: fmtP(proceedsP), tx_hash: tx, memo: debit.memo },
+    { dr_cr: "CR", account: "digital_asset", amount_twd: fmtP(grossP), asset: ev.asset, qty: ev.qty, tx_hash: tx },
+  ];
+  if (impairmentP > ZERO) {
+    lines.push({ dr_cr: "DR", account: "accum_impairment", amount_twd: fmtP(impairmentP), asset: ev.asset, tx_hash: tx });
+  }
+  if (deltaP > ZERO) lines.push({ dr_cr: "CR", account: "disposal_gain", amount_twd: fmtP(deltaP), tx_hash: tx, memo: "disposal_leg" });
+  else if (deltaP < ZERO) lines.push({ dr_cr: "DR", account: "disposal_loss", amount_twd: fmtP(-deltaP), tx_hash: tx, memo: "disposal_leg" });
+  return lines;
+}
+
 /** DISPOSE (§5/§6): consume lots per cost flow; book proceeds vs carrying. */
 function dispose(db: DB, ev: SubledgerEvent): { lines: JournalLine[] } {
   const cfg = classify(db, ev.asset);
-  const { carrying_twd } = consumeLots(db, {
+  const { gross_twd, impairment_twd } = consumeLots(db, {
     disposal_event_id: ev.event_id,
     wallet_id: ev.wallet_id,
     asset: ev.asset,
     qty: ev.qty,
     cost_flow: cfg.cost_flow,
   });
-
-  const proceedsInternal = parseDecimal(ev.proceeds_twd ?? "0", TWD_INTERNAL_SCALE);
-  const proceedsPosting = rescale(proceedsInternal, TWD_INTERNAL_SCALE, TWD_POSTING_SCALE);
-  const carryingPosting = rescale(carrying_twd, TWD_INTERNAL_SCALE, TWD_POSTING_SCALE);
-  // Compute the disposal delta at posting scale so the entry balances exactly.
-  const deltaPosting = proceedsPosting - carryingPosting;
-  const tx = ev.tx_hash ?? null;
-
-  const lines: JournalLine[] = [
-    { dr_cr: "DR", account: "bank", amount_twd: formatDecimal(proceedsPosting, TWD_POSTING_SCALE), tx_hash: tx },
-    { dr_cr: "CR", account: "digital_asset", amount_twd: formatDecimal(carryingPosting, TWD_POSTING_SCALE), asset: ev.asset, qty: ev.qty, tx_hash: tx },
-  ];
-  if (deltaPosting > ZERO) {
-    lines.push({ dr_cr: "CR", account: "disposal_gain", amount_twd: formatDecimal(deltaPosting, TWD_POSTING_SCALE), tx_hash: tx });
-  } else if (deltaPosting < ZERO) {
-    lines.push({ dr_cr: "DR", account: "disposal_loss", amount_twd: formatDecimal(-deltaPosting, TWD_POSTING_SCALE), tx_hash: tx });
-  }
-  return { lines };
+  const toP = (v: Minor) => rescale(v, TWD_INTERNAL_SCALE, TWD_POSTING_SCALE);
+  const proceedsP = toP(parseDecimal(ev.proceeds_twd ?? "0", TWD_INTERNAL_SCALE));
+  return { lines: disposalLines(ev, proceedsP, toP(gross_twd), toP(impairment_twd), { account: "bank" }) };
 }
 
 /**
@@ -237,7 +250,7 @@ function paySupplier(db: DB, ev: SubledgerEvent): { lines: JournalLine[] } {
     USD_SCALE + FX_SCALE,
     TWD_INTERNAL_SCALE,
   );
-  const { carrying_twd: lotCarrying } = consumeLots(db, {
+  const { gross_twd, impairment_twd } = consumeLots(db, {
     disposal_event_id: ev.event_id,
     wallet_id: ev.wallet_id,
     asset: ev.asset,
@@ -246,17 +259,20 @@ function paySupplier(db: DB, ev: SubledgerEvent): { lines: JournalLine[] } {
   });
   updateMonetaryItem(db, ap.doc_no, formatDecimal(apSettled, TWD_INTERNAL_SCALE), false);
 
-  const apCarryingP = rescale(apCarrying, TWD_INTERNAL_SCALE, TWD_POSTING_SCALE);
-  const lotCarryingP = rescale(lotCarrying, TWD_INTERNAL_SCALE, TWD_POSTING_SCALE);
-  const apSettledP = rescale(apSettled, TWD_INTERNAL_SCALE, TWD_POSTING_SCALE);
+  const toP = (v: Minor) => rescale(v, TWD_INTERNAL_SCALE, TWD_POSTING_SCALE);
+  const apCarryingP = toP(apCarrying);
+  const grossP = toP(gross_twd);
+  const impairmentP = toP(impairment_twd);
+  const apSettledP = toP(apSettled);
   const fxLegP = apSettledP - apCarryingP; // AP up = loss
-  const disposalLegP = apSettledP - lotCarryingP; // value settled - carrying
+  const disposalLegP = apSettledP - (grossP - impairmentP); // value settled - net carrying
   const tx = ev.tx_hash ?? null;
 
   const lines: JournalLine[] = [
     { dr_cr: "DR", account: "accounts_payable", amount_twd: fmtP(apCarryingP), orig_ccy: ap.ccy, orig_amount: ap.orig_amount, tx_hash: tx, memo: ap.doc_no },
-    { dr_cr: "CR", account: "digital_asset", amount_twd: fmtP(lotCarryingP), asset: ev.asset, qty: ev.qty, tx_hash: tx },
+    { dr_cr: "CR", account: "digital_asset", amount_twd: fmtP(grossP), asset: ev.asset, qty: ev.qty, tx_hash: tx },
   ];
+  if (impairmentP > ZERO) lines.push({ dr_cr: "DR", account: "accum_impairment", amount_twd: fmtP(impairmentP), asset: ev.asset, tx_hash: tx });
   if (fxLegP > ZERO) lines.push({ dr_cr: "DR", account: "fx_gain_loss", amount_twd: fmtP(fxLegP), tx_hash: tx, memo: "fx_leg" });
   else if (fxLegP < ZERO) lines.push({ dr_cr: "CR", account: "fx_gain_loss", amount_twd: fmtP(-fxLegP), tx_hash: tx, memo: "fx_leg" });
   if (disposalLegP > ZERO) lines.push({ dr_cr: "CR", account: "disposal_gain", amount_twd: fmtP(disposalLegP), tx_hash: tx, memo: "disposal_leg" });
@@ -313,25 +329,15 @@ function gas(db: DB, ev: SubledgerEvent): { lines: JournalLine[] } {
     parseDecimal(price.price_usd, PRICE_SCALE),
     parseDecimal(price.usd_twd_rate, FX_SCALE),
   );
-  const { carrying_twd } = consumeLots(db, {
+  const { gross_twd, impairment_twd } = consumeLots(db, {
     disposal_event_id: ev.event_id,
     wallet_id: ev.wallet_id,
     asset: ev.asset,
     qty: ev.qty,
     cost_flow: classify(db, ev.asset).cost_flow,
   });
-
-  const fvP = rescale(fv, TWD_INTERNAL_SCALE, TWD_POSTING_SCALE);
-  const carryingP = rescale(carrying_twd, TWD_INTERNAL_SCALE, TWD_POSTING_SCALE);
-  const deltaP = fvP - carryingP;
-  const tx = ev.tx_hash ?? null;
-  const lines: JournalLine[] = [
-    { dr_cr: "DR", account: "fee_expense", amount_twd: fmtP(fvP), asset: ev.asset, qty: ev.qty, tx_hash: tx, memo: "gas" },
-    { dr_cr: "CR", account: "digital_asset", amount_twd: fmtP(carryingP), asset: ev.asset, qty: ev.qty, tx_hash: tx },
-  ];
-  if (deltaP > ZERO) lines.push({ dr_cr: "CR", account: "disposal_gain", amount_twd: fmtP(deltaP), tx_hash: tx, memo: "disposal_leg" });
-  else if (deltaP < ZERO) lines.push({ dr_cr: "DR", account: "disposal_loss", amount_twd: fmtP(-deltaP), tx_hash: tx, memo: "disposal_leg" });
-  return { lines };
+  const toP = (v: Minor) => rescale(v, TWD_INTERNAL_SCALE, TWD_POSTING_SCALE);
+  return { lines: disposalLines(ev, toP(fv), toP(gross_twd), toP(impairment_twd), { account: "fee_expense", memo: "gas" }) };
 }
 
 /**

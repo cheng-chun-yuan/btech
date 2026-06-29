@@ -1,7 +1,17 @@
 import { describe, it, expect } from "vitest";
 
-import { journalRows, positions, lotDisposals, pnlDetail } from "./outputs";
+import {
+  journalRows,
+  positions,
+  lotDisposals,
+  pnlDetail,
+  reconciliationRows,
+  exceptions,
+  auditPack,
+  disclosures,
+} from "./outputs";
 import { ingest } from "./engine";
+import { runReconcile } from "./reconcile";
 import { openTestSubledgerDb, insertPrice, type DB } from "./store";
 import { DEFAULT_COA_CODES, type SubledgerEvent } from "./types";
 
@@ -84,5 +94,49 @@ describe("outputs ③ pnl_detail", () => {
 
     const imp = pnl.find((p) => p.type === "impairment" && p.event_id === "pe1")!;
     expect(imp.amount).toBe("-341000.0000");
+  });
+});
+
+describe("outputs ⑤ reconciliation + ⑨ exceptions", () => {
+  it("exposes stored reconciliation rows and recon-break exceptions", () => {
+    const db = openTestSubledgerDb();
+    seed(db);
+    ingest(db, buy("b1", "2026-06-01"));
+    runReconcile(db, "2026-06", { BTC: "0.4" }); // subledger 1.0 -> break
+
+    const recon = reconciliationRows(db);
+    expect(recon.some((r) => r.asset === "BTC" && r.status === "break")).toBe(true);
+    const exc = exceptions(db);
+    expect(exc.some((e) => e.kind === "recon_break")).toBe(true);
+  });
+});
+
+describe("outputs ⑥ audit_pack", () => {
+  it("bundles period JEs, reconciliation, disposals, tx index, policy version", () => {
+    const db = openTestSubledgerDb();
+    seed(db);
+    ingest(db, buy("b1", "2026-06-01"));
+    ingest(db, buy("b2", "2026-06-05"));
+    runReconcile(db, "2026-06", { BTC: "2" });
+
+    const pack = auditPack(db, "2026-06");
+    expect(pack.policy_version).toBe("2026-06-29");
+    expect(pack.journal.every((r) => r.date.startsWith("2026-06"))).toBe(true);
+    expect(pack.reconciliation.length).toBeGreaterThan(0);
+    expect(pack.tx_hash_index).toBeDefined();
+    expect(pack.immutable_log.length).toBeGreaterThan(0);
+  });
+});
+
+describe("outputs ⑧ disclosures", () => {
+  it("summarizes holdings, policy and the fx-lock note", () => {
+    const db = openTestSubledgerDb();
+    seed(db);
+    ingest(db, buy("b1", "2026-06-01"));
+
+    const d = disclosures(db);
+    expect(d.holdings.length).toBeGreaterThan(0);
+    expect(d.policy.some((p) => p.key === "functional_currency" && p.value === "TWD")).toBe(true);
+    expect(d.fx_lock_note).toMatch(/non-monetary/i);
   });
 });

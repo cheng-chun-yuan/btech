@@ -103,6 +103,10 @@ export interface ConsumeResult {
   consumed: ConsumedLot[];
   /** Total carrying (net of impairment) of the consumed quantity, internal scale. */
   carrying_twd: Minor;
+  /** Gross cost basis consumed (the digital_asset credit on disposal). */
+  gross_twd: Minor;
+  /** Accumulated impairment consumed (the accum_impairment debit on disposal). */
+  impairment_twd: Minor;
 }
 
 export interface ConsumeInput {
@@ -127,6 +131,8 @@ export function consumeLots(db: DB, input: ConsumeInput): ConsumeResult {
 
   const consumed: ConsumedLot[] = [];
   let carrying = ZERO;
+  let grossTotal = ZERO;
+  let impairmentTotal = ZERO;
   const updateLot = db.prepare(
     "UPDATE sl_lot SET remaining_qty=?, remaining_cost_twd=?, accum_impairment_twd=? WHERE lot_id=?",
   );
@@ -152,6 +158,8 @@ export function consumeLots(db: DB, input: ConsumeInput): ConsumeResult {
       const impPortion = mulDivRound(accumImp, take, remaining);
       const carryNet = costPortion - impPortion;
       carrying += carryNet;
+      grossTotal += costPortion;
+      impairmentTotal += impPortion;
 
       const takeStr = formatDecimal(take, scale);
       const carryStr = formatDecimal(carryNet, TWD_INTERNAL_SCALE);
@@ -173,5 +181,5 @@ export function consumeLots(db: DB, input: ConsumeInput): ConsumeResult {
   });
   tx();
 
-  return { consumed, carrying_twd: carrying };
+  return { consumed, carrying_twd: carrying, gross_twd: grossTotal, impairment_twd: impairmentTotal };
 }

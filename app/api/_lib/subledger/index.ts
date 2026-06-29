@@ -5,10 +5,12 @@
 // injected PricePoint / config data in the sl_* store.
 
 export { ingest, type IngestResult } from "./engine";
+export { runReconcile, type ReconResult } from "./reconcile";
 export {
   migrateSubledger,
   seedConfig,
   insertPrice,
+  insertMonetaryItem,
   getJournalEntries,
   openTestSubledgerDb,
   type DB,
@@ -20,10 +22,18 @@ export {
   positions,
   lotDisposals,
   pnlDetail,
+  reconciliationRows,
+  exceptions,
+  auditPack,
+  disclosures,
   toCsv,
   type JournalRow,
   type PositionRow,
   type DisposalRow,
   type PnlRow,
+  type ReconciliationRowOut,
+  type ExceptionRow,
+  type AuditPack,
+  type Disclosures,
 } from "./outputs";
 export * from "./types";
