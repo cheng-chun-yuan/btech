@@ -1318,6 +1318,209 @@ git commit -m "feat: persist approvals and real live signatures across signers"
 
 ---
 
+## Task 9: Audit log infrastructure (tables, helpers, guarded route)
+
+**Files:**
+- Modify: `app/api/_lib/db.ts` (add `audit_log` + `chat_members` tables; bump `SCHEMA_VERSION` to 2)
+- Create: `app/api/_lib/audit.ts`, `app/api/_lib/audit.test.ts`, `app/api/chats/[id]/audit/route.ts`
+
+**Interfaces:**
+- Produces:
+  - `recordAudit(db, { chatId, actorNpub, actorLabel, action, detail }): AuditEntry` — inserts an `audit_log` row and auto-adds the actor to `chat_members`.
+  - `isMember(db, chatId, npub): boolean` — true if npub is a signer (any vault) OR in `chat_members(chatId)`.
+  - `addMember(db, chatId, npub): void` — `INSERT OR IGNORE`.
+  - `listAudit(db, chatId): AuditEntry[]` — newest-first.
+  - `resolveChatId(db, vaultName): string` — maps an approval's vault display name (e.g. `#treasury-ops`) to a chat id (`treasury`); falls back to the input.
+  - `AuditEntry = { id, chat_id, actor_npub, actor_label, action, detail, created_at }`.
+  - HTTP: `GET /api/chats/[id]/audit` → 401 unauth / 403 non-member / 200 `{ entries }`.
+
+- [ ] **Step 1: Add tables to `migrate()` and bump `SCHEMA_VERSION` to 2** in `app/api/_lib/db.ts`:
+
+```sql
+CREATE TABLE IF NOT EXISTS audit_log (
+  id TEXT PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  actor_npub TEXT NOT NULL,
+  actor_label TEXT NOT NULL,
+  action TEXT NOT NULL,
+  detail TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_members (
+  chat_id TEXT NOT NULL,
+  npub TEXT NOT NULL,
+  PRIMARY KEY (chat_id, npub)
+);
+```
+
+- [ ] **Step 2: Write the failing test** `app/api/_lib/audit.test.ts`:
+
+```ts
+import { describe, it, expect } from "vitest";
+import { openTestDb } from "./db";
+import { recordAudit, isMember, listAudit } from "./audit";
+import { syncSigners } from "./identity";
+
+describe("audit", () => {
+  it("signers are members; observers are not", () => {
+    const db = openTestDb();
+    syncSigners(db, [{ participant_id: 1, label: "Alice", role: "Founder" }]);
+    const signer = db.prepare("SELECT npub FROM signers LIMIT 1").get() as { npub: string };
+    expect(isMember(db, "treasury", signer.npub)).toBe(true);
+    expect(isMember(db, "treasury", "npub_outsider")).toBe(false);
+  });
+
+  it("records entries and auto-adds the actor as a member", () => {
+    const db = openTestDb();
+    recordAudit(db, { chatId: "cold", actorNpub: "npub_obs", actorLabel: "Obs", action: "message", detail: "hi" });
+    expect(isMember(db, "cold", "npub_obs")).toBe(true);
+    const entries = listAudit(db, "cold");
+    expect(entries.length).toBe(1);
+    expect(entries[0].action).toBe("message");
+  });
+});
+```
+
+- [ ] **Step 3: Run test to verify it fails** — `bun run test app/api/_lib/audit.test.ts` → FAIL (module missing).
+
+- [ ] **Step 4: Implement** `app/api/_lib/audit.ts`:
+
+```ts
+import { randomBytes } from "node:crypto";
+import type { DB } from "./db";
+
+export type AuditAction = "propose" | "sign" | "message" | "join";
+export type AuditEntry = {
+  id: string; chat_id: string; actor_npub: string; actor_label: string;
+  action: AuditAction; detail: string | null; created_at: number;
+};
+
+export function addMember(db: DB, chatId: string, npub: string): void {
+  db.prepare("INSERT OR IGNORE INTO chat_members (chat_id, npub) VALUES (?, ?)").run(chatId, npub);
+}
+
+export function isMember(db: DB, chatId: string, npub: string): boolean {
+  const signer = db.prepare("SELECT 1 FROM signers WHERE npub = ? LIMIT 1").get(npub);
+  if (signer) return true;
+  return !!db.prepare("SELECT 1 FROM chat_members WHERE chat_id = ? AND npub = ?").get(chatId, npub);
+}
+
+export function recordAudit(
+  db: DB,
+  e: { chatId: string; actorNpub: string; actorLabel: string; action: AuditAction; detail?: string },
+): AuditEntry {
+  const entry: AuditEntry = {
+    id: `a_${randomBytes(6).toString("hex")}`,
+    chat_id: e.chatId, actor_npub: e.actorNpub, actor_label: e.actorLabel,
+    action: e.action, detail: e.detail ?? null, created_at: Date.now(),
+  };
+  db.prepare(`INSERT INTO audit_log (id, chat_id, actor_npub, actor_label, action, detail, created_at)
+    VALUES (@id, @chat_id, @actor_npub, @actor_label, @action, @detail, @created_at)`).run(entry);
+  addMember(db, e.chatId, e.actorNpub);
+  return entry;
+}
+
+export function listAudit(db: DB, chatId: string): AuditEntry[] {
+  return db.prepare("SELECT * FROM audit_log WHERE chat_id = ? ORDER BY created_at DESC, id DESC")
+    .all(chatId) as AuditEntry[];
+}
+
+export function resolveChatId(db: DB, vaultName: string): string {
+  if (vaultName === "#treasury-ops") return "treasury";
+  const row = db.prepare("SELECT id FROM chats WHERE name = ?").get(vaultName) as { id: string } | undefined;
+  return row?.id ?? vaultName;
+}
+```
+
+- [ ] **Step 5: Run test to verify it passes** — `bun run test app/api/_lib/audit.test.ts` → PASS (2 tests).
+
+- [ ] **Step 6: Implement the guarded route** `app/api/chats/[id]/audit/route.ts`:
+
+```ts
+import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+
+import { getDb } from "../../../_lib/db";
+import { getSessionUser, SESSION_COOKIE } from "../../../_lib/auth";
+import { isMember, listAudit } from "../../../_lib/audit";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+export async function GET(_req: Request, context: { params: Promise<{ id: string }> }) {
+  const { id } = await context.params;
+  const db = getDb();
+  const user = getSessionUser(db, (await cookies()).get(SESSION_COOKIE)?.value);
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!isMember(db, id, user.npub)) {
+    return NextResponse.json({ error: "Restricted to vault members" }, { status: 403 });
+  }
+  return NextResponse.json({ entries: listAudit(db, id) });
+}
+```
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add app/api/_lib/db.ts app/api/_lib/audit.ts app/api/_lib/audit.test.ts app/api/chats/[id]/audit
+git commit -m "feat: add per-chat audit log with member-only visibility"
+```
+
+> **Recording hooks (folded into Tasks 7 & 8):**
+> - Task 7 `POST /api/messages`: after insert, `recordAudit(db, { chatId, actorNpub: user.npub, actorLabel: user.label, action: "message", detail: text.slice(0,80) })`.
+> - Task 8 `POST /api/approvals` (propose): `recordAudit(..., action: "propose", detail: approval.title)` against `resolveChatId(db, approval.vault)`.
+> - Task 8 `POST /api/approvals/[id]/sign`: `recordAudit(..., action: "sign", detail: aggregate ? "live HTSS aggregate" : approval.title)` against `resolveChatId(db, approval.vault)`.
+
+## Task 10: Audit panel in the chat UI
+
+**Files:**
+- Modify: `app/ui/wallet/wallet.tsx`
+
+**Interfaces:**
+- Consumes: `GET /api/chats/[id]/audit` (200 entries | 403 restricted).
+
+- [ ] **Step 1:** Add per-chat audit state + fetch when a chat is opened:
+
+```tsx
+const [audit, setAudit] = useState<{ entries?: AuditEntryUI[]; restricted?: boolean }>({});
+useEffect(() => {
+  if (!activeChatId) return;
+  fetch(`/api/chats/${activeChatId}/audit`).then(async (r) => {
+    if (r.status === 403) return setAudit({ restricted: true });
+    if (!r.ok) return setAudit({});
+    setAudit({ entries: (await r.json()).entries });
+  });
+}, [activeChatId]);
+```
+
+where `type AuditEntryUI = { id: string; actor_label: string; action: string; detail: string | null; created_at: number }`.
+
+- [ ] **Step 2:** Render an **Audit** section in the open chat: a compact list of
+`{actor_label} {action} {detail}` rows with a relative time. If `audit.restricted`,
+render "Audit log restricted to vault members" instead. Action labels must not rely
+on color alone (per `PRODUCT.md`) — prefix with a glyph (e.g. `✓ signed`,
+`◆ proposed`, `· message`).
+
+- [ ] **Step 3: Verify** — as a signer, open `#treasury-ops`, propose+sign, see
+the audit rows appear; refresh persists them. Log in with a random nsec (Observer)
+and open the same vault → "restricted to vault members".
+
+```bash
+# member sees entries (cookie = signer session)
+curl -s -b "btech_session=<signer-token>" localhost:3000/api/chats/treasury/audit | head -c 200; echo
+# outsider blocked
+curl -s -o /dev/null -w "observer -> HTTP %{http_code}\n" -b "btech_session=<observer-token>" localhost:3000/api/chats/treasury/audit
+```
+
+Expected: signer 200 with entries; observer 403.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add app/ui/wallet/wallet.tsx
+git commit -m "feat: show member-only audit log panel in each chat"
+```
+
 ## Self-Review
 
 **Spec coverage:**

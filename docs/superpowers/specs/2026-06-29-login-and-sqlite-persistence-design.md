@@ -171,6 +171,31 @@ that return the **same shapes** → minimal component churn. `buildLiveVault`,
 `buildLiveApproval`, `livePolicyString` (in `data.ts`) stay; they just consume
 fetched data instead of constants.
 
+## 6a. Audit log & per-chat visibility (added 2026-06-29)
+
+Each chat/vault keeps a **full audit log** of security-relevant actions —
+`propose` (approval created), `sign` (who signed, + signature ref), and
+`message` — recorded with actor npub, actor label, and timestamp.
+
+**Visibility is enforced server-side**, not just hidden in the UI: a user may
+read a chat's audit log only if they are a **member** of that chat. Membership =
+the npub is a **signer of that vault** *or* has **participated** in the chat
+(posted / proposed / signed). Non-members ("outside") receive **403**. An
+`Observer` (logged in with a non-signer key, no participation) is outside every
+vault → cannot read any audit log.
+
+- New tables: `audit_log(id, chat_id, actor_npub, actor_label, action, detail,
+  created_at)` and `chat_members(chat_id, npub, PRIMARY KEY(chat_id, npub))`.
+- Membership is computed as `isMember = signer(npub) OR chat_members(chat_id, npub)`
+  — so all signers are members of every vault, and any actor is auto-added to the
+  chat they act in. No per-chat member seeding required.
+- New route: `GET /api/chats/[id]/audit` → 401 if unauthenticated, 403 if not a
+  member, else `{ entries: AuditEntry[] }` newest-first.
+- Recording hooks: `POST /api/messages` (message), `POST /api/approvals`
+  (propose), `POST /api/approvals/[id]/sign` (sign).
+- UI: an **Audit** panel inside each chat, visible to members; for non-members
+  the panel shows a "restricted to vault members" notice instead of entries.
+
 ## 7. File layout (new / changed)
 
 ```
