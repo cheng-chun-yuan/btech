@@ -4,7 +4,7 @@ import { cookies } from "next/headers";
 import { getDb } from "../../../_lib/db";
 import { getSessionUser, SESSION_COOKIE } from "../../../_lib/auth";
 import { recordAudit, resolveChatId } from "../../../_lib/audit";
-import { runDemo } from "../../../_lib/btech";
+import { runSignApproval } from "../../../_lib/btech";
 import type { Approval, SigningProof } from "../../../../ui/wallet/types";
 
 export const runtime = "nodejs";
@@ -22,20 +22,45 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
   if (!row) return NextResponse.json({ error: "Unknown approval" }, { status: 404 });
 
   const approval = JSON.parse(row.data_json) as Approval;
+  const auditChatId = resolveChatId(db, approval.vault);
 
   let aggregate: string | null = null;
   let proof: SigningProof | undefined;
   if (row.is_live || approval.live) {
-    // Live vault: run a real grouped HTSS signing round in Rust.
-    const report = await runDemo();
-    aggregate = report.aggregate_signature;
-    proof = {
-      digest: report.authorization_digest,
-      signature: report.aggregate_signature,
-      groupKey: report.group_xonly_public_key,
-      signers: report.signers,
-      verified: report.verified,
-    };
+    // Live vault: run a real grouped HTSS round in Rust, signing the approval's
+    // actual recipient + amount so the signature is bound to this transaction.
+    const recipient = approval.recipientAddress ?? approval.dest ?? "";
+    const amountSats =
+      approval.amountSats ?? Math.round(parseFloat(approval.btc ?? "0") * 1e8);
+    try {
+      const report = await runSignApproval(
+        { recipient, amountSats, nonce: approval.id, memo: approval.title },
+        auditChatId, // sign with this vault's own key
+      );
+      proof = {
+        digest: report.authorization_digest,
+        signature: report.aggregate_signature,
+        groupKey: report.group_xonly_public_key,
+        signers: report.signers,
+        verified: report.verified,
+      };
+      if (!report.verified) throw new Error("aggregate signature failed verification");
+      aggregate = report.aggregate_signature;
+    } catch (err) {
+      // Record the failed signing attempt in the audit trail, then surface it.
+      recordAudit(db, {
+        chatId: auditChatId,
+        actorNpub: user.npub,
+        actorLabel: user.label,
+        action: "sign",
+        outcome: "failed",
+        detail: `${approval.title}: ${err instanceof Error ? err.message : "signing failed"}`,
+      });
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "Signing failed" },
+        { status: 502 },
+      );
+    }
   }
 
   db.prepare(`
@@ -57,11 +82,12 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     .run(JSON.stringify(updated), updated.status, id);
 
   recordAudit(db, {
-    chatId: resolveChatId(db, approval.vault),
+    chatId: auditChatId,
     actorNpub: user.npub,
     actorLabel: user.label,
     action: "sign",
-    detail: aggregate ? "live HTSS aggregate signature" : approval.title,
+    outcome: "success",
+    detail: aggregate ? "live HTSS aggregate signature verified" : approval.title,
   });
 
   return NextResponse.json({ approval: updated });

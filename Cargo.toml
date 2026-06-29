@@ -6,8 +6,23 @@ rust-version = "1.76"
 
 [dependencies]
 anyhow = "1"
-dkgkit-nostr = { path = "../dkgkit/crates/dkgkit-nostr" }
+dkgkit-nostr = { path = "../dkgkit/crates/dkgkit-nostr", features = ["live"] }
 dkgkit-sdk = { path = "../dkgkit/crates/dkgkit-sdk" }
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+nostr-sdk = { version = "0.44", default-features = false, features = ["nip44"] }
+
+[[bin]]
+name = "btech"
+path = "src/main.rs"
+
+[[bin]]
+name = "vaultd"
+path = "src/bin/vaultd.rs"
+
+[[bin]]
+name = "relaydemo"
+path = "src/bin/relaydemo.rs"

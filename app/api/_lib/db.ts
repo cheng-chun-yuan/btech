@@ -7,7 +7,7 @@ import type { Chat } from "../../ui/wallet/types";
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 4;
 
 export function migrate(db: DB): void {
   db.pragma("journal_mode = WAL");
@@ -83,6 +83,7 @@ export function migrate(db: DB): void {
       actor_npub TEXT NOT NULL,
       actor_label TEXT NOT NULL,
       action TEXT NOT NULL,
+      outcome TEXT,
       detail TEXT,
       created_at INTEGER NOT NULL
     );
@@ -91,6 +92,11 @@ export function migrate(db: DB): void {
       chat_id TEXT NOT NULL,
       npub TEXT NOT NULL,
       PRIMARY KEY (chat_id, npub)
+    );
+
+    CREATE TABLE IF NOT EXISTS auth_challenges (
+      nonce TEXT PRIMARY KEY,
+      expires_at INTEGER NOT NULL
     );
   `);
   const row = db.prepare("SELECT version FROM schema_meta LIMIT 1").get() as

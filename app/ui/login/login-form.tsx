@@ -1,9 +1,25 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { nip19, getPublicKey } from "nostr-tools";
+import { nip19, finalizeEvent } from "nostr-tools";
+import type { Event, EventTemplate } from "nostr-tools";
 
 type Persona = { npub: string; label: string; role: string; participant_id: number };
+
+function challengeTemplate(nonce: string): EventTemplate {
+  return {
+    kind: 27235,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [["challenge", nonce]],
+    content: `btech-login:${nonce}`,
+  };
+}
+
+/** Same deterministic secret the server derives for a demo persona. */
+async function personaSecret(participantId: number): Promise<Uint8Array> {
+  const data = new TextEncoder().encode(`btech-signer-v1:${participantId}`);
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+}
 
 const C = {
   bg: "#0A0B0D",
@@ -18,7 +34,10 @@ const MONO = "'JetBrains Mono', monospace";
 
 declare global {
   interface Window {
-    nostr?: { getPublicKey(): Promise<string> };
+    nostr?: {
+      getPublicKey(): Promise<string>;
+      signEvent(event: EventTemplate): Promise<Event>;
+    };
   }
 }
 
@@ -35,14 +54,17 @@ export default function LoginForm() {
       .catch(() => setPersonas([]));
   }, []);
 
-  async function login(npub: string) {
+  // Prove key ownership: fetch a one-time challenge, sign it, post the event.
+  async function submit(sign: (nonce: string) => Promise<Event>) {
     setBusy(true);
     setError(null);
     try {
+      const { nonce } = (await (await fetch("/api/auth/challenge")).json()) as { nonce: string };
+      const event = await sign(nonce);
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ npub }),
+        body: JSON.stringify({ event, nonce }),
       });
       if (!res.ok) throw new Error(((await res.json()) as { error?: string }).error ?? "Login failed");
       window.location.href = "/";
@@ -52,25 +74,32 @@ export default function LoginForm() {
     }
   }
 
-  async function connectNip07() {
-    try {
+  function connectNip07() {
+    void submit(async (nonce) => {
       if (!window.nostr) throw new Error("No NIP-07 extension found (try Alby or nos2x)");
-      const hex = await window.nostr.getPublicKey();
-      await login(nip19.npubEncode(hex));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "NIP-07 connect failed");
-    }
+      return window.nostr.signEvent(challengeTemplate(nonce));
+    });
   }
 
   function loginWithNsec() {
-    try {
-      const dec = nip19.decode(nsec.trim());
-      if (dec.type !== "nsec") throw new Error("Not an nsec key");
-      const hex = getPublicKey(dec.data as Uint8Array);
-      void login(nip19.npubEncode(hex));
-    } catch {
+    const dec = (() => {
+      try {
+        return nip19.decode(nsec.trim());
+      } catch {
+        return null;
+      }
+    })();
+    if (!dec || dec.type !== "nsec") {
       setError("Invalid nsec");
+      return;
     }
+    void submit(async (nonce) => finalizeEvent(challengeTemplate(nonce), dec.data as Uint8Array));
+  }
+
+  function loginPersona(participantId: number) {
+    void submit(async (nonce) =>
+      finalizeEvent(challengeTemplate(nonce), await personaSecret(participantId)),
+    );
   }
 
   return (
@@ -134,7 +163,7 @@ export default function LoginForm() {
               {personas.map((p) => (
                 <button
                   key={p.npub}
-                  onClick={() => login(p.npub)}
+                  onClick={() => loginPersona(p.participant_id)}
                   disabled={busy}
                   style={{ ...btn(C.bg, C.ink, C.line), display: "flex", justifyContent: "space-between" }}
                 >

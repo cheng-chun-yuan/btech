@@ -1,15 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 import { ApprovalCard } from "./approval-card";
-import {
-  BTC_USD,
-  buildLiveApproval,
-  buildLiveVault,
-} from "./data";
+import { buildLiveApproval, buildLiveVault } from "./data";
+import { useBtcPrice } from "./use-btc-price";
 import type {
   Approval,
   Chat,
@@ -46,6 +43,7 @@ type AuditEntryUI = {
   id: string;
   actor_label: string;
   action: "propose" | "sign" | "message" | "join";
+  outcome: "success" | "failed" | null;
   detail: string | null;
   created_at: number;
 };
@@ -88,6 +86,44 @@ export default function Wallet() {
   const [signingId, setSigningId] = useState<string | null>(null);
   const [me, setMe] = useState<{ npub: string; label: string; participant_id: number | null } | null>(null);
   const [audit, setAudit] = useState<{ entries?: AuditEntryUI[]; restricted?: boolean }>({});
+  const [chainTip, setChainTip] = useState<number | null>(null);
+  const btcPrice = useBtcPrice();
+
+  useEffect(() => {
+    fetch("/api/chain/tip")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d?.height != null) setChainTip(d.height);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Replace placeholder balances with the real on-chain balance of each vault's
+  // receive address (fetched once per address). Deposits to the address show up.
+  const balancedAddrs = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const targets = chats.filter(
+      (c) => c.receiveAddress && !balancedAddrs.current.has(c.receiveAddress),
+    );
+    if (targets.length === 0) return;
+    const targetIds = new Set(targets.map((c) => c.id));
+    targets.forEach((c) => balancedAddrs.current.add(c.receiveAddress!));
+    // Mark pending ("") so the UI shows a loading state, not the seeded number.
+    setChats((prev) => prev.map((x) => (targetIds.has(x.id) ? { ...x, balanceBtc: "" } : x)));
+    for (const c of targets) {
+      void (async () => {
+        let sats = 0;
+        try {
+          const r = await fetch(`/api/chain/address/${c.receiveAddress}`);
+          if (r.ok) sats = ((await r.json()) as { totalSats: number }).totalSats;
+        } catch {
+          /* unreachable / demo address → treat as 0 */
+        }
+        const btc = sats / 1e8;
+        setChats((prev) => prev.map((x) => (x.id === c.id ? { ...x, balanceBtc: btc.toFixed(8) } : x)));
+      })();
+    }
+  }, [chats]);
 
   const refreshAudit = useCallback(async (chatId: string) => {
     const res = await fetch(`/api/chats/${chatId}/audit`);
@@ -100,6 +136,47 @@ export default function Wallet() {
     await fetch("/api/auth/logout", { method: "POST" });
     window.location.href = "/login";
   }, []);
+
+  const onCreateChannel = useCallback(async () => {
+    const name = window.prompt("New channel name (e.g. marketing)");
+    if (!name?.trim()) return;
+    try {
+      const res = await fetch("/api/chats", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) throw new Error(((await res.json()) as { error?: string }).error ?? "Create failed");
+      const { chat } = (await res.json()) as { chat: Chat };
+      setChats((prev) => [...prev, { ...chat, messages: [] }]);
+      setView("chat");
+      setActiveChat(chat.id);
+      setDraft("");
+    } catch (e) {
+      setStateError(e instanceof Error ? e.message : "Create channel failed");
+    }
+  }, []);
+
+  const [provisioningId, setProvisioningId] = useState<string | null>(null);
+  const onCreateVault = useCallback(
+    async (chatId: string) => {
+      setProvisioningId(chatId);
+      setChats((prev) => prev.map((c) => (c.id === chatId ? { ...c, vaultStatus: "pending" } : c)));
+      try {
+        const res = await fetch(`/api/vaults/${chatId}/provision`, { method: "POST" });
+        if (!res.ok) throw new Error(((await res.json()) as { error?: string }).error ?? "Provision failed");
+        const { chat } = (await res.json()) as { chat: Partial<Chat> };
+        setChats((prev) => prev.map((c) => (c.id === chatId ? { ...c, ...chat } : c)));
+        void refreshAudit(chatId);
+      } catch (e) {
+        setStateError(e instanceof Error ? e.message : "Provision failed");
+        setChats((prev) => prev.map((c) => (c.id === chatId ? { ...c, vaultStatus: undefined } : c)));
+      } finally {
+        setProvisioningId(null);
+      }
+    },
+    [refreshAudit],
+  );
 
   // Load persisted chats/approvals/identity plus the real DKGKit vault state,
   // and fold the live vault in on top.
@@ -318,7 +395,7 @@ export default function Wallet() {
     const policy = chat.tiers.map((t) => `${clampNeed(t)}/${t.keys.length}`).join(" + ");
     const dest = sendForm.dest.trim();
     const destShort = dest.length > 16 ? `${dest.slice(0, 8)}…${dest.slice(-4)}` : dest;
-    const usd = Math.round(amt * BTC_USD).toLocaleString("en-US");
+    const usd = btcPrice != null ? Math.round(amt * btcPrice).toLocaleString("en-US") : "";
     const cid = activeChat;
     const module = sendForm.module;
     setSendForm({ open: false, module: "Bitcoin regtest", dest: "", amount: "" });
@@ -365,9 +442,12 @@ export default function Wallet() {
   };
 
   // ---- derived values ----
-  const totalBtc = chats.reduce((s, c) => s + parseFloat(c.balanceBtc), 0);
-  const totalKeys = chats.reduce((s, c) => s + c.tiers.reduce((a, t) => a + t.keys.length, 0), 0);
-  const vaultCount = chats.length;
+  // Only chats with a shared vault count toward treasury totals (DMs are chat-only).
+  const vaultChats = chats.filter((c) => c.vaultStatus || c.tiers.length > 0);
+  const totalBtc = vaultChats.reduce((s, c) => s + (parseFloat(c.balanceBtc) || 0), 0);
+  const balancesPending = vaultChats.some((c) => c.receiveAddress && c.balanceBtc === "");
+  const totalKeys = vaultChats.reduce((s, c) => s + c.tiers.reduce((a, t) => a + t.keys.length, 0), 0);
+  const vaultCount = vaultChats.length;
   const pendingCount = approvals.filter((t) => t.status === "pending" || t.status === "ready").length;
   const youNeed = approvals.filter((t) => !t.youSigned && t.status === "pending").length;
   const sendApprovals = approvals.filter((a) => a.kind !== "role");
@@ -383,7 +463,14 @@ export default function Wallet() {
   if (view === "chat") {
     if (active) {
       pageTitle = active.name;
-      pageSub = (active.type === "direct" ? "Direct message · secured by a " : `${active.members} members · secured by a `) + quorumOf(active.tiers) + " vault";
+      const activeHasVault = !!active.vaultStatus || active.tiers.length > 0;
+      if (active.type === "direct") {
+        pageSub = activeHasVault
+          ? `Direct message · secured by a ${quorumOf(active.tiers)} vault`
+          : "Direct message";
+      } else {
+        pageSub = `${active.members} members · secured by a ${quorumOf(active.tiers)} vault`;
+      }
     } else {
       pageTitle = "Chats";
       pageSub = "Every treasury group you belong to";
@@ -402,6 +489,7 @@ export default function Wallet() {
         go={go}
         openChat={openChat}
         goPlan={go("plan")}
+        onCreateChannel={onCreateChannel}
       />
 
       <main style={{ flex: 1, height: "100%", display: "flex", flexDirection: "column", minWidth: 0 }}>
@@ -413,8 +501,14 @@ export default function Wallet() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${C.line2}`, borderRadius: 9, padding: "8px 12px", fontSize: 12.5, color: "#9CA1A7" }}>
               <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.green, boxShadow: "0 0 0 3px rgba(63,185,80,.16)" }} />
-              BTC ${BTC_USD.toLocaleString("en-US")}
+              {btcPrice != null ? `BTC $${btcPrice.toLocaleString("en-US")}` : "BTC · syncing…"}
             </div>
+            {chainTip != null && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${C.line2}`, borderRadius: 9, padding: "8px 12px", fontSize: 12.5, color: "#9CA1A7" }} title="Live regtest chain tip">
+                <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.orange, boxShadow: "0 0 0 3px rgba(247,147,26,.16)" }} />
+                regtest · tip {chainTip.toLocaleString("en-US")}
+              </div>
+            )}
             {me && (
               <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${C.line2}`, borderRadius: 9, padding: "6px 8px 6px 12px", fontSize: 12.5, color: "#9CA1A7" }}>
                 <span>
@@ -446,8 +540,8 @@ export default function Wallet() {
           {view === "overview" && (
             <Overview
               wstate={wstate}
-              balanceBtc={totalBtc.toFixed(2)}
-              balanceUsd={Math.round(totalBtc * BTC_USD).toLocaleString("en-US")}
+              balanceBtc={balancesPending ? "…" : totalBtc.toFixed(2)}
+              balanceUsd={balancesPending || btcPrice == null ? "…" : Math.round(totalBtc * btcPrice).toLocaleString("en-US")}
               vaultCount={vaultCount}
               totalKeys={totalKeys}
               pendingCount={pendingCount}
@@ -474,6 +568,13 @@ export default function Wallet() {
             <ChatDetail
               chat={active}
               audit={audit}
+              pendingApprovals={approvals.filter(
+                (a) => a.vault === active.name && a.status === "pending",
+              )}
+              onSign={onSign}
+              signingId={signingId}
+              onCreateVault={onCreateVault}
+              provisioning={provisioningId === active.id}
               showVault={showVault}
               toggleVault={toggleVault}
               wstate={wstate}
@@ -508,6 +609,7 @@ function Sidebar({
   go,
   openChat,
   goPlan,
+  onCreateChannel,
 }: {
   view: View;
   active: Chat | null;
@@ -516,6 +618,7 @@ function Sidebar({
   go: (v: View) => () => void;
   openChat: (id: string) => () => void;
   goPlan: () => void;
+  onCreateChannel: () => void;
 }) {
   const nav = [
     { key: "overview" as const, label: "Overview", icon: "◉", badge: "" },
@@ -557,7 +660,16 @@ function Sidebar({
       </nav>
 
       <div style={{ marginTop: 7, paddingLeft: 8, display: "flex", flexDirection: "column", gap: 2 }}>
-        <div style={{ fontSize: 10, color: "#5E6369", letterSpacing: ".5px", padding: "5px 10px 3px" }}>CHANNELS</div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 10px 3px" }}>
+          <span style={{ fontSize: 10, color: "#5E6369", letterSpacing: ".5px" }}>CHANNELS</span>
+          <button
+            onClick={onCreateChannel}
+            title="Create a channel vault"
+            style={{ background: "transparent", border: "none", color: C.orange, fontSize: 15, lineHeight: 1, cursor: "pointer", fontFamily: "inherit", padding: "0 2px" }}
+          >
+            +
+          </button>
+        </div>
         {channels.map((c) => {
           const on = view === "chat" && !!active && c.id === active.id;
           return (
@@ -724,42 +836,22 @@ function LiveVaultCard({ wstate }: { wstate: WalletState }) {
   const { demo, session } = wstate;
   return (
     <div style={{ background: C.surface, border: "1px solid rgba(63,185,80,.25)", borderRadius: 16, padding: "20px 22px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16 }}>
         <span style={{ fontSize: 13, fontWeight: 600 }}>Live DKGKit vault</span>
         <span style={{ fontSize: 9.5, fontWeight: 600, letterSpacing: ".4px", color: C.green, background: "rgba(63,185,80,.12)", padding: "3px 8px", borderRadius: 20 }}>
-          {demo.verified ? "BIP340 VERIFIED" : "UNVERIFIED"}
+          {demo.verified ? "VERIFIED" : "UNVERIFIED"}
         </span>
         <span style={{ fontSize: 11, color: C.faint2 }}>{demo.network} · {session.htss.threshold}</span>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 26px", marginTop: 12 }}>
-        <KV label="Group x-only key" value={shortHex(demo.group_xonly_public_key)} />
-        <KV label="Receive address" value={shortHex(demo.receive_address)} />
-        <KV label="Receive path" value={demo.receive_path} />
-        <KV label="Aggregate signature" value={shortHex(demo.aggregate_signature)} />
+      <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px" }}>Receive address</div>
+      <div style={{ fontFamily: MONO, fontSize: 13, color: C.ink, marginTop: 4, wordBreak: "break-all" }}>
+        {demo.receive_address}
       </div>
-      <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
-        <Proof ok={session.invalid_htss_signer_set_rejected} text="Invalid signer set rejected" />
-        <Proof ok={session.high_rank_cannot_substitute_low_group} text="High-rank can't substitute a low-rank quorum" />
-        <Proof ok={session.tss.verified} text={`Base TSS ${session.tss.threshold} verified`} />
+      <div style={{ fontSize: 11.5, color: C.faint2, marginTop: 14, lineHeight: 1.5 }}>
+        Secured by a <span style={{ color: "#C5C9CE", fontFamily: MONO }}>{session.htss.threshold}</span> grouped
+        threshold. No single signer can move funds — every spend needs a quorum from each tier.
       </div>
     </div>
-  );
-}
-
-function KV({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px" }}>{label}</div>
-      <div style={{ fontFamily: MONO, fontSize: 12, color: "#C5C9CE", marginTop: 3, wordBreak: "break-all" }}>{value}</div>
-    </div>
-  );
-}
-
-function Proof({ ok, text }: { ok: boolean; text: string }) {
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, color: ok ? C.green : C.red, background: ok ? "rgba(63,185,80,.1)" : "rgba(240,97,109,.1)", padding: "5px 10px", borderRadius: 20 }}>
-      {ok ? "✓" : "✗"} {text}
-    </span>
   );
 }
 
@@ -829,6 +921,11 @@ function TabButton({ active, onClick, label, count }: { active: boolean; onClick
 function ChatDetail({
   chat,
   audit,
+  pendingApprovals,
+  onSign,
+  signingId,
+  onCreateVault,
+  provisioning,
   showVault,
   toggleVault,
   draft,
@@ -843,6 +940,11 @@ function ChatDetail({
 }: {
   chat: Chat;
   audit: { entries?: AuditEntryUI[]; restricted?: boolean };
+  pendingApprovals: Approval[];
+  onSign: (id: string) => void;
+  signingId: string | null;
+  onCreateVault: (chatId: string) => void;
+  provisioning: boolean;
   showVault: boolean;
   toggleVault: () => void;
   wstate: WalletState | null;
@@ -857,6 +959,8 @@ function ChatDetail({
   proposeKey: (chatId: string, tierId: string) => () => void;
 }) {
   const quorum = quorumOf(chat.tiers);
+  const hasVault = !!chat.vaultStatus || chat.tiers.length > 0;
+  const isDirect = chat.type === "direct";
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 126px)", gap: 14 }}>
       <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 14 }}>
@@ -867,12 +971,15 @@ function ChatDetail({
           </div>
           <div style={{ fontSize: 11.5, color: C.faint2, display: "flex", alignItems: "center", gap: 7, marginTop: 2 }}>
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }} />
-            {chat.type === "direct" ? "Direct message" : "Channel"} · {chat.members} members · {chat.balanceBtc} BTC
+            {isDirect ? "Direct message" : "Channel"} · {chat.members} members
+            {hasVault ? (chat.balanceBtc === "" ? " · syncing…" : ` · ${chat.balanceBtc} BTC`) : ""}
           </div>
         </div>
-        <button onClick={toggleVault} style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${showVault ? C.orange : "rgba(255,255,255,.1)"}`, color: showVault ? C.orange : "#C5C9CE", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", whiteSpace: "nowrap", padding: "9px 14px", borderRadius: 9, cursor: "pointer" }}>
-          <span style={{ fontFamily: MONO }}>{quorum}</span> {showVault ? "Hide vault policy" : "Vault policy"}
-        </button>
+        {hasVault && (
+          <button onClick={toggleVault} style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${showVault ? C.orange : "rgba(255,255,255,.1)"}`, color: showVault ? C.orange : "#C5C9CE", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", whiteSpace: "nowrap", padding: "9px 14px", borderRadius: 9, cursor: "pointer" }}>
+            <span style={{ fontFamily: MONO }}>{quorum}</span> {showVault ? "Hide vault policy" : "Vault policy"}
+          </button>
+        )}
       </div>
 
       <div style={{ display: "flex", gap: 18, flex: 1, minHeight: 0 }}>
@@ -895,7 +1002,7 @@ function ChatDetail({
             ))}
           </div>
           <div style={{ flex: "0 0 auto", borderTop: `1px solid ${C.line}`, padding: "14px 16px" }}>
-            {sendForm.open && (
+            {hasVault && sendForm.open && (
               <div style={{ background: "#0E1014", border: "1px solid rgba(247,147,26,.3)", borderRadius: 12, padding: 14, marginBottom: 12 }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
                   <span style={{ fontSize: 12.5, fontWeight: 600, color: C.orange }}>Propose a BTC transfer</span>
@@ -922,22 +1029,203 @@ function ChatDetail({
               </div>
             )}
             <div style={{ display: "flex", gap: 8, alignItems: "center", background: C.surface2, border: "1px solid rgba(255,255,255,.08)", borderRadius: 11, padding: "6px 6px 6px 8px" }}>
-              <button onClick={() => setSendForm({ open: true, module: "Bitcoin regtest", dest: "", amount: "" })} title="Propose a BTC transfer" style={{ flex: "0 0 auto", width: 34, height: 34, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "rgba(247,147,26,.14)", color: C.orange, borderRadius: 8, cursor: "pointer", fontFamily: MONO, fontSize: 17, fontWeight: 700 }}>₿</button>
+              {hasVault && (
+                <button onClick={() => setSendForm({ open: true, module: "Bitcoin regtest", dest: "", amount: "" })} title="Propose a BTC transfer" style={{ flex: "0 0 auto", width: 34, height: 34, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "rgba(247,147,26,.14)", color: C.orange, borderRadius: 8, cursor: "pointer", fontFamily: MONO, fontSize: 17, fontWeight: 700 }}>₿</button>
+              )}
               <input value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); onSendMsg(); } }} placeholder={`Message ${chat.name}`} style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", outline: "none", color: C.ink, fontSize: 13, fontFamily: "inherit" }} />
               <button onClick={onSendMsg} style={{ flex: "0 0 auto", background: C.orange, border: "none", color: C.bg, fontSize: 13, fontWeight: 600, fontFamily: "inherit", padding: "8px 18px", borderRadius: 8, cursor: "pointer" }}>Send</button>
             </div>
             <div style={{ fontSize: 10.5, color: "#5E6369", marginTop: 9, padding: "0 2px", lineHeight: 1.5 }}>
-              Tap <span style={{ color: C.sand }}>₿</span> (or type <span style={{ color: C.sand, fontFamily: MONO }}>/send</span>) to propose a BTC transfer. Signed with your Nostr key and relayed to the group.
+              {hasVault ? (
+                <>Tap <span style={{ color: C.sand }}>₿</span> (or type <span style={{ color: C.sand, fontFamily: MONO }}>/send</span>) to propose a BTC transfer. Signed with your Nostr key and relayed over Nostr.</>
+              ) : (
+                <>Direct message. Create a shared vault from the panel to send bitcoin together.</>
+              )}
             </div>
           </div>
         </div>
 
-        {showVault && (
+        {showVault && hasVault && (
           <VaultPanel chat={chat} setThreshold={setThreshold} removeKey={removeKey} proposeKey={proposeKey} />
         )}
-        <AuditPanel audit={audit} />
+        {!isDirect && (
+          <div style={{ flex: "0 0 296px", display: "flex", flexDirection: "column", gap: 14, minHeight: 0 }}>
+            <VaultCard chat={chat} isDirect={isDirect} provisioning={provisioning} onCreateVault={onCreateVault} />
+            <OngoingProposals proposals={pendingApprovals} onSign={onSign} signingId={signingId} />
+            <AuditPanel audit={audit} />
+          </div>
+        )}
       </div>
     </div>
+  );
+}
+
+// ===========================================================================
+// Vault card — per-chat address / pending / create-vault state
+// ===========================================================================
+
+function VaultCard({
+  chat,
+  isDirect,
+  provisioning,
+  onCreateVault,
+}: {
+  chat: Chat;
+  isDirect: boolean;
+  provisioning: boolean;
+  onCreateVault: (chatId: string) => void;
+}) {
+  const status: "none" | "pending" | "active" = provisioning
+    ? "pending"
+    : (chat.vaultStatus ?? (chat.tiers.length > 0 ? "active" : "none"));
+
+  const [chain, setChain] = useState<{ totalSats: number; confirmedSats: number; mempoolSats: number } | null>(null);
+  const [chainErr, setChainErr] = useState(false);
+  useEffect(() => {
+    if (status !== "active" || !chat.receiveAddress) return;
+    let cancelled = false;
+    setChain(null);
+    setChainErr(false);
+    fetch(`/api/chain/address/${chat.receiveAddress}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("chain"))))
+      .then((d) => !cancelled && setChain(d))
+      .catch(() => !cancelled && setChainErr(true));
+    return () => {
+      cancelled = true;
+    };
+  }, [status, chat.receiveAddress]);
+
+  return (
+    <aside style={{ flex: "0 0 auto", background: C.surface, border: `1px solid ${C.line2}`, borderRadius: 16, padding: 16 }}>
+      <div style={{ fontSize: 13, fontWeight: 600 }}>Shared vault</div>
+
+      {status === "none" && (
+        <>
+          <div style={{ fontSize: 11.5, color: C.faint2, marginTop: 6, lineHeight: 1.5 }}>
+            {isDirect
+              ? "This is a direct chat. Create a 2-of-2 vault to hold and spend bitcoin together."
+              : "No shared vault yet."}
+          </div>
+          {isDirect && (
+            <button
+              onClick={() => onCreateVault(chat.id)}
+              style={{ width: "100%", marginTop: 12, background: C.orange, border: "none", color: C.bg, fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", padding: "9px 12px", borderRadius: 8, cursor: "pointer" }}
+            >
+              Create 2-of-2 vault
+            </button>
+          )}
+        </>
+      )}
+
+      {status === "pending" && (
+        <div style={{ fontSize: 11.5, color: C.sand, marginTop: 8, display: "flex", alignItems: "center", gap: 7 }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.sand }} />
+          Provisioning vault… running DKG
+        </div>
+      )}
+
+      {status === "active" && (
+        <>
+          <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px", marginTop: 10 }}>Receive address</div>
+          {chat.receiveAddress ? (
+            <div style={{ fontFamily: MONO, fontSize: 11.5, color: "#C5C9CE", marginTop: 4, wordBreak: "break-all" }}>
+              {chat.receiveAddress}
+            </div>
+          ) : (
+            <div style={{ fontSize: 11.5, color: C.sand, marginTop: 4 }}>Address provisioning…</div>
+          )}
+          {chat.receiveAddress && (
+            <>
+              <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px", marginTop: 12 }}>
+                On-chain balance · regtest
+              </div>
+              <div style={{ fontFamily: MONO, fontSize: 13, color: chain && chain.totalSats > 0 ? C.green : "#C5C9CE", marginTop: 3 }}>
+                {chain
+                  ? `${(chain.totalSats / 1e8).toFixed(8)} BTC`
+                  : chainErr
+                    ? "—"
+                    : "checking…"}
+                {chain && chain.mempoolSats > 0 && (
+                  <span style={{ color: C.sand }}> ({(chain.mempoolSats / 1e8).toFixed(8)} pending)</span>
+                )}
+              </div>
+            </>
+          )}
+          {chat.tiers.length > 0 && (
+            <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint2, marginTop: 10 }}>
+              {quorumOf(chat.tiers)} quorum
+            </div>
+          )}
+        </>
+      )}
+    </aside>
+  );
+}
+
+// ===========================================================================
+// Ongoing proposals — pending approvals for this vault, awaiting a quorum
+// ===========================================================================
+
+function OngoingProposals({
+  proposals,
+  onSign,
+  signingId,
+}: {
+  proposals: Approval[];
+  onSign: (id: string) => void;
+  signingId: string | null;
+}) {
+  return (
+    <aside style={{ flex: "0 0 auto", background: C.surface, border: `1px solid ${C.line2}`, borderRadius: 16, padding: 16 }}>
+      <div style={{ fontSize: 13, fontWeight: 600 }}>Ongoing proposals</div>
+      <div style={{ fontSize: 10.5, color: C.faint, marginTop: 2, marginBottom: 12 }}>
+        Awaiting a signing quorum
+      </div>
+      {proposals.length === 0 ? (
+        <div style={{ fontSize: 11.5, color: C.faint2 }}>No proposals in flight.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {proposals.map((p) => {
+            const pct = Math.min(100, Math.round((p.signed / Math.max(1, p.threshold)) * 100));
+            return (
+              <div key={p.id} style={{ borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 600 }}>{p.title}</div>
+                {p.btc && (
+                  <div style={{ fontFamily: MONO, fontSize: 11, color: C.faint2, marginTop: 2 }}>
+                    {p.btc} BTC{p.dest ? ` → ${p.dest}` : ""}
+                  </div>
+                )}
+                <div style={{ marginTop: 8, height: 5, background: "rgba(255,255,255,.06)", borderRadius: 4, overflow: "hidden" }}>
+                  <div style={{ width: `${pct}%`, height: "100%", background: C.orange }} />
+                </div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 7 }}>
+                  <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint2 }}>
+                    {p.signed}/{p.threshold} signed
+                  </span>
+                  <button
+                    onClick={() => onSign(p.id)}
+                    disabled={p.youSigned || signingId === p.id}
+                    style={{
+                      background: p.youSigned ? "transparent" : C.orange,
+                      color: p.youSigned ? C.faint2 : C.bg,
+                      border: p.youSigned ? `1px solid ${C.line2}` : "none",
+                      borderRadius: 7,
+                      padding: "4px 10px",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      fontFamily: "inherit",
+                      cursor: p.youSigned ? "default" : "pointer",
+                    }}
+                  >
+                    {signingId === p.id ? "Signing…" : p.youSigned ? "You signed" : "Sign"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </aside>
   );
 }
 
@@ -1000,6 +1288,22 @@ function AuditPanel({ audit }: { audit: { entries?: AuditEntryUI[]; restricted?:
                 <div>
                   <span style={{ fontWeight: 600 }}>{e.actor_label}</span>{" "}
                   <span style={{ color: C.muted }}>{AUDIT_VERB[e.action] ?? e.action}</span>
+                  {e.outcome && (
+                    <span
+                      style={{
+                        marginLeft: 6,
+                        fontSize: 9,
+                        fontWeight: 600,
+                        letterSpacing: ".3px",
+                        padding: "1px 6px",
+                        borderRadius: 20,
+                        color: e.outcome === "success" ? C.green : C.red,
+                        background: e.outcome === "success" ? "rgba(63,185,80,.12)" : "rgba(240,97,109,.12)",
+                      }}
+                    >
+                      {e.outcome === "success" ? "✓ SUCCESS" : "✗ FAILED"}
+                    </span>
+                  )}
                 </div>
                 {e.detail && (
                   <div style={{ color: C.faint2, fontSize: 10.5, marginTop: 2, wordBreak: "break-word" }}>

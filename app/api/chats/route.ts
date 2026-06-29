@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { randomBytes } from "node:crypto";
 
 import { getDb } from "../_lib/db";
+import { getSessionUser, SESSION_COOKIE } from "../_lib/auth";
+import { addMember, recordAudit } from "../_lib/audit";
+import { runDemo } from "../_lib/btech";
 import type { Chat, ChatMessage } from "../../ui/wallet/types";
 
 export const runtime = "nodejs";
@@ -22,4 +27,66 @@ export async function GET() {
     return { ...meta, messages };
   });
   return NextResponse.json({ chats });
+}
+
+/** Create a channel (group vault) and provision a real receive address. */
+export async function POST(request: Request) {
+  const db = getDb();
+  const user = getSessionUser(db, (await cookies()).get(SESSION_COOKIE)?.value);
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const { name } = (await request.json().catch(() => ({}))) as { name?: string };
+  const clean = name?.trim().replace(/^#/, "");
+  if (!clean) return NextResponse.json({ error: "name required" }, { status: 400 });
+
+  const id = `ch_${randomBytes(5).toString("hex")}`;
+  let receiveAddress: string;
+  try {
+    // Each channel gets its own DKG vault (distinct group key + address).
+    receiveAddress = (await runDemo(id)).receive_address;
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "vault provisioning failed" },
+      { status: 502 },
+    );
+  }
+  const initials = user.label.split(" ").map((p) => p[0]).join("").slice(0, 2).toUpperCase();
+  const chat: Omit<Chat, "messages"> = {
+    id,
+    type: "channel",
+    name: `#${clean}`,
+    desc: "Group vault",
+    members: 1,
+    balanceBtc: "0.00",
+    balanceUsd: "0",
+    vaultStatus: "active",
+    receiveAddress,
+    tiers: [
+      {
+        id: "signers",
+        name: "Signers",
+        short: "Signers",
+        minNeed: 1,
+        keys: [{ id: "creator", initials, name: `${user.label} (you)`, device: "DKGKit share", status: "online" }],
+      },
+    ],
+  };
+
+  db.prepare("INSERT INTO chats (id, type, name, data_json) VALUES (?, ?, ?, ?)").run(
+    id,
+    chat.type,
+    chat.name,
+    JSON.stringify(chat),
+  );
+  addMember(db, id, user.npub);
+  recordAudit(db, {
+    chatId: id,
+    actorNpub: user.npub,
+    actorLabel: user.label,
+    action: "propose",
+    outcome: "success",
+    detail: `Created channel ${chat.name}`,
+  });
+
+  return NextResponse.json({ chat });
 }

@@ -1,9 +1,21 @@
 import { createHash } from "node:crypto";
-import { nip19 } from "nostr-tools";
+import { nip19, getPublicKey } from "nostr-tools";
 
 import type { DB } from "./db";
 
 const VAULT_ID = "treasury";
+
+/**
+ * Deterministic 32-byte secret for a demo participant. Shared basis between the
+ * server (derives the npub) and the browser (signs the login challenge for a
+ * one-tap persona). Demo-only: the secret is recomputable, which is fine for
+ * shared demo identities — real users bring their own NIP-07/nsec key.
+ */
+export function deterministicSecret(participantId: number): Uint8Array {
+  return new Uint8Array(
+    createHash("sha256").update(`btech-signer-v1:${participantId}`).digest(),
+  );
+}
 
 export function isValidNpub(npub: string): boolean {
   try {
@@ -28,8 +40,9 @@ export function normalizeNpub(input: string): string | null {
 }
 
 export function deterministicNpub(participantId: number): string {
-  const hex = createHash("sha256").update(`btech-signer-v1:${participantId}`).digest("hex");
-  return nip19.npubEncode(hex);
+  // Real keypair: pubkey derived from the deterministic secret (so the persona
+  // can produce a valid Schnorr signature over the login challenge).
+  return nip19.npubEncode(getPublicKey(deterministicSecret(participantId)));
 }
 
 type Invite = { participant_id: number; label: string; role: string };

@@ -60,6 +60,11 @@ impl VaultService {
     }
 
     pub fn run_htss_dkg(&mut self) -> Result<()> {
+        // Idempotent: a finalized vault keeps its shares so signing can reuse the
+        // same DKG (run once, sign many) when the service is long-lived.
+        if self.group_key.is_some() {
+            return Ok(());
+        }
         for participant in &self.dkg.config.participants {
             let state = self.dkg.begin_round1(participant.id)?;
             self.coordinator

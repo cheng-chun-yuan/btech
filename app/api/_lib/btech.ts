@@ -90,8 +90,72 @@ async function runBtech(args: string[]): Promise<unknown> {
   return JSON.parse(stdout);
 }
 
-export function runDemo(): Promise<DemoReport> {
+/** Vault info for `vaultId` (each vault has its own DKG/group key/address).
+ * Prefers btech-vaultd so the receive address is STABLE (DKG runs once); the
+ * CLI regenerates a fresh vault — and address — on every call. */
+export async function runDemo(vaultId = "treasury"): Promise<DemoReport> {
+  if (VAULTD_URL) {
+    const res = await fetch(`${VAULTD_URL}/vault/state?id=${encodeURIComponent(vaultId)}`).catch(
+      () => null,
+    );
+    if (res?.ok) {
+      const s = (await res.json()) as Partial<DemoReport>;
+      return {
+        signers: [],
+        authorization_digest: "",
+        aggregate_signature: "",
+        verified: true,
+        remaining_relay_events: 0,
+        ...s,
+      } as DemoReport;
+    }
+  }
   return runBtech(["--json"]) as Promise<DemoReport>;
+}
+
+export type SignApprovalParams = {
+  recipient: string;
+  amountSats: number;
+  nonce: string;
+  memo: string;
+};
+
+/** Long-lived vault service URL (e.g. http://127.0.0.1:8787). When set, signing
+ * goes through `btech-vaultd` (DKG run once, fast) instead of spawning the CLI. */
+const VAULTD_URL = process.env.BTECH_VAULTD_URL?.replace(/\/$/, "");
+
+/**
+ * Sign a real payment authorization: the aggregate signature is bound to the
+ * approval's actual recipient + amount + id, not a fixed demo digest. Uses
+ * btech-vaultd over HTTP when available, otherwise falls back to the CLI.
+ */
+export async function runSignApproval(
+  p: SignApprovalParams,
+  vaultId = "treasury",
+): Promise<DemoReport> {
+  const amountSats = Math.max(0, Math.round(p.amountSats));
+  if (VAULTD_URL) {
+    const res = await fetch(`${VAULTD_URL}/vault/sign?id=${encodeURIComponent(vaultId)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ recipient: p.recipient, amountSats, nonce: p.nonce, memo: p.memo }),
+    });
+    if (!res.ok) {
+      throw new Error(`vaultd sign failed: ${res.status} ${await res.text().catch(() => "")}`);
+    }
+    return (await res.json()) as DemoReport;
+  }
+  return runBtech([
+    "--sign-approval-json",
+    "--recipient",
+    p.recipient,
+    "--amount",
+    String(amountSats),
+    "--nonce",
+    p.nonce,
+    "--memo",
+    p.memo,
+  ]) as Promise<DemoReport>;
 }
 
 export function runSessionProof(sessionId: string): Promise<SessionProofReport> {

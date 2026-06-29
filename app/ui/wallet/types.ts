@@ -48,7 +48,13 @@ export type Chat = {
   balanceUsd: string;
   /** When true, this vault is backed by the real DKGKit crate. */
   live?: boolean;
-  /** Real Taproot receive address (live vault only). */
+  /**
+   * Vault provisioning state. `undefined` = chat only (no shared vault, e.g. a
+   * plain DM); `"pending"` = vault created, DKG/address being provisioned;
+   * `"active"` = receive address available.
+   */
+  vaultStatus?: "pending" | "active";
+  /** Real Taproot receive address (set once the vault is provisioned). */
   receiveAddress?: string;
   /** Real group x-only public key (live vault only). */
   groupKey?: string;
@@ -84,6 +90,10 @@ export type Approval = {
   status: ApprovalStatus;
   /** Set when this approval is bound to the live DKGKit vault. */
   live?: boolean;
+  /** Full destination address (not the truncated `dest`); signed into the digest. */
+  recipientAddress?: string;
+  /** Amount in satoshis; signed into the authorization digest. */
+  amountSats?: number;
   /** Real cryptographic result, populated after a live signing round. */
   proof?: SigningProof;
 };
