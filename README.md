@@ -1,124 +1,87 @@
-# BTech DKGKit Next App
+# BTech — Institutional Bitcoin Treasury, built on DKGKit
 
-A Next.js console plus a Rust wallet-service layer that integrates the local
-`../dkgkit` crates. Use **Bun** for the web app and **Cargo** for the Rust DKGKit
-service. The live vault runs on **regtest**.
+BTech is a treasury console for **companies and institutions that want to hold
+and use bitcoin themselves** — without handing custody to an exchange, and
+without any single person (or device) able to move funds alone.
 
-It implements the local flow:
+It is built on top of [**DKGKit**](../dkgkit), which provides the cryptography:
+a **Hierarchical Threshold Signature Scheme (HTSS)** where the spending key is
+generated and held collectively, and a spend requires a quorum across
+organizational tiers — not one signer, not one server.
 
-```text
-create vault -> HTSS DKG complete -> Taproot address derived -> approval signed -> aggregate verifies
-```
+## Why
 
-On top of that core, the app adds:
+Companies increasingly hold bitcoin on their balance sheet, but the options are
+poor: trust a custodian, or run a brittle multisig spreadsheet of hardware
+wallets. BTech treats the company's signing structure as a first-class object:
+
+- **No single point of failure.** The key is never assembled in one place. DKG
+  (distributed key generation) means no party ever sees the full secret.
+- **Org-shaped control.** Approvals map to how a company actually decides —
+  C-level, managers, operators — each tier contributing its own quorum.
+- **Auditable by the people accountable.** Every proposal and signature is
+  recorded per vault and visible to its members, not to outsiders.
+- **Self-custody.** Your quorum, your coins. BTech holds no keys.
+
+## Built on DKGKit (HTSS)
+
+DKGKit gives BTech the full threshold-signing lifecycle:
+
+- **DKG** — distributed key generation; shares are created collectively, the
+  full key is never materialized.
+- **Grouped / hierarchical threshold signing** — a policy like
+  `(1,2,3)-of-(2,3,5)` across C-level / Managers / Operators tiers. A spend
+  needs a quorum from **each** tier; a high-rank signer cannot substitute for a
+  missing lower-rank group.
+- **Reshare** — rotate the signer set and refresh shares (onboard/offboard a
+  signer, recover from a lost device) **without changing the vault address or
+  exposing the key**.
+- **Taproot + BIP340** — Schnorr aggregate signatures verified on-chain-style;
+  funds receive to a single Taproot address.
+- **Nostr coordination** — signers are Nostr identities; rounds are coordinated
+  as Nostr events.
+
+## What the console does
 
 - **Nostr login** — sign in with a NIP-07 extension, a pasted `nsec`, or a
-  one-tap demo persona. Your npub maps to a vault signer.
-- **SQLite persistence** — sessions, chats, messages, approvals, and signatures
-  survive restarts. The Rust crypto stays stateless and deterministic.
+  one-tap demo persona. Your npub maps to a vault signer (non-signers join as
+  read-only observers).
+- **Grouped HTSS vault** — a live treasury vault with a real
+  `(1,2,3)-of-(2,3,5)` policy across three tiers.
+- **Real, verified signing** — "Approve & sign" runs an actual grouped HTSS
+  round in Rust and shows the BIP340-verified aggregate signature, signer set,
+  group key, and digest.
 - **Per-chat audit log** — every propose / sign / message is recorded and is
-  **visible only to vault members** (outsiders get 403).
+  **visible only to vault members**; outsiders are denied.
+- **Persistent state** — sessions, chats, messages, approvals, and signatures
+  persist across restarts (local SQLite); the Rust crypto stays stateless.
 
-## Prerequisites
+## Quickstart
 
-- The `dkgkit` crates checked out as a sibling: `../dkgkit/crates/{dkgkit-sdk,dkgkit-nostr}`.
-- [Bun](https://bun.sh) and a Rust toolchain (`cargo`, rust-version 1.76+).
-
-## Setup & run
+Requires the [`dkgkit`](../dkgkit) crates as a sibling checkout, plus
+[Bun](https://bun.sh) and a Rust toolchain.
 
 ```bash
-# 1. Build the Rust service (the API routes prefer the prebuilt binary)
-cargo build
-
-# 2. Install web deps and start the dev server
+cargo build        # build the Rust DKGKit service
 bun install
-bun run dev
+bun run dev        # http://localhost:3000  (log in with a demo persona)
 ```
 
-Then open <http://localhost:3000>. You'll be redirected to `/login`.
+The live vault runs on **regtest**. App state lives in `data/btech.db`
+(override with `BTECH_DB`); delete it to reset the demo.
 
-> **Dev tip:** if the auth guard ever stops redirecting after many hot reloads
-> (a known Turbopack dev quirk), restart clean with `rm -rf .next && bun run dev`.
-> The production build always enforces it.
+The console exposes auth (`/api/auth/*`), chat/approval persistence
+(`/api/chats`, `/api/messages`, `/api/approvals`, `/api/approvals/[id]/sign`),
+the member-only audit log (`/api/chats/[id]/audit`), and the raw DKGKit proof
+routes (`/api/demo`, `/api/session-proof`). See `app/api/` for shapes.
 
-## Login
+## Scope & roadmap
 
-You are identified by your Nostr public key (`npub`). Three ways in:
+This is a local demo shell focused on the threshold-control story:
+DKG → Taproot address → grouped HTSS approval → BIP340 verification, with login,
+persistence, and audit. **Reshare and recovery** are DKGKit capabilities the
+platform is designed around and are next on the roadmap for the console.
 
-1. **Demo persona** — one-tap "log in as Alice / Bob / …". Each is a seeded
-   signer, so role-based views and multi-signer approvals work immediately.
-2. **NIP-07 extension** — Alby / nos2x (`window.nostr.getPublicKey()`).
-3. **Paste `nsec`** — the secret is decoded **in the browser**; only the derived
-   npub is sent to the server.
-
-A logged-in npub that is not a vault signer becomes a read-only **observer**.
-
-Example — log in as the first demo persona over the API:
-
-```bash
-NPUB=$(curl -s localhost:3000/api/auth/personas | jq -r '.personas[0].npub')
-curl -i -X POST localhost:3000/api/auth/login \
-  -H 'content-type: application/json' -d "{\"npub\":\"$NPUB\"}"
-# -> 200 { "label": "Alice", "role": "Founder", "signer": true } + Set-Cookie: btech_session=...
-```
-
-## Storage
-
-Local SQLite via `better-sqlite3`, seeded from the demo chats/approvals on first
-run.
-
-- File: `data/btech.db` (gitignored). Override with `BTECH_DB=/path/to.db`.
-- **Reset the demo state:** `rm -f data/btech.db*` and restart.
-
-## API routes
-
-Auth + app data (all require the session cookie except `/api/auth/*`):
-
-| Route | Method | Purpose |
-|---|---|---|
-| `/api/auth/personas` | GET | list seeded signer identities |
-| `/api/auth/login` `/logout` `/me` | POST/POST/GET | session lifecycle |
-| `/api/chats` | GET | chats with messages |
-| `/api/messages` | POST | post a message `{ chatId, text }` |
-| `/api/approvals` | GET / POST | list / create approvals |
-| `/api/approvals/[id]/sign` | POST | sign; live vault runs a real HTSS round |
-| `/api/chats/[id]/audit` | GET | audit trail — **members only (403 otherwise)** |
-
-Example — sign the live approval (runs a real grouped HTSS round in Rust) and
-read the member-only audit log (`$C` is the cookie from login above):
-
-```bash
-curl -s -b "$C" -X POST localhost:3000/api/approvals/tx1/sign | jq '.approval.proof.verified'   # -> true
-curl -s -b "$C" localhost:3000/api/chats/treasury/audit | jq '.entries[0]'
-# -> { "actor_label": "Alice", "action": "sign", "detail": "live HTSS aggregate signature", ... }
-```
-
-### Core DKGKit proof routes
-
-`POST /api/demo` invokes `cargo run --quiet -- --json` and returns the vault ID,
-regtest receive address, signer set, authorization digest, aggregate signature,
-and `verified: true` when the grouped signer set passes policy and the aggregate
-BIP340 signature verifies.
-
-`POST /api/session-proof` invokes `cargo run --quiet -- --session-proof-json
---session-id <id>` and returns invited participants, the vault policy per group,
-a base `2-of-3` TSS/FROST proof, a grouped HTSS signing proof, confirmation that
-an invalid HTSS signer set was rejected, and proof that high-rank signers cannot
-replace a missing lower-rank quorum. Base TSS is a separate proof, not merged
-into HTSS policy.
-
-## Verify
-
-```bash
-cargo fmt --all --check
-cargo test
-bun run test        # vitest unit tests (db, identity, auth, audit)
-bun run typecheck
-bun run build
-```
-
-## Scope
-
-This is a local demo shell. It intentionally does **not** include production
-relay networking, NIP-44 encryption, PSBT construction, transaction broadcast,
-recovery, reshare, real `nsec` signature verification, or mainnet custody claims.
+Not yet included: production relay networking, NIP-44 encryption, PSBT
+construction, transaction broadcast, and mainnet custody. Not financial or
+custody advice.
