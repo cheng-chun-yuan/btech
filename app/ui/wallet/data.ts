@@ -25,6 +25,8 @@ export const MOCK_CHATS: Chat[] = [
     members: 5,
     balanceBtc: "420.00",
     balanceUsd: "26,968,200",
+    vaultStatus: "active",
+    receiveAddress: "bcrt1qc0ld5rsrv8q2k7p3m4n5j6h8g0f2d4s6a8c0ld",
     tiers: [
       {
         id: "board",
@@ -53,6 +55,8 @@ export const MOCK_CHATS: Chat[] = [
     members: 4,
     balanceBtc: "3.20",
     balanceUsd: "205,472",
+    vaultStatus: "active",
+    receiveAddress: "bcrt1qpettyc4sh0ps2k7p3m4n5j6h8g0f2d4s6petty",
     tiers: [
       {
         id: "pops",
@@ -81,18 +85,7 @@ export const MOCK_CHATS: Chat[] = [
     members: 2,
     balanceBtc: "0.85",
     balanceUsd: "54,578",
-    tiers: [
-      {
-        id: "pair",
-        name: "Both parties",
-        short: "Pair",
-        minNeed: 2,
-        keys: [
-          { id: "dk", initials: "DK", name: "Dana Klein (you)", device: "CFO · Ledger Stax", status: "online" },
-          { id: "ar", initials: "AR", name: "Ana Rivera", device: "Ops Lead · Coldcard Mk4", status: "online" },
-        ],
-      },
-    ],
+    tiers: [],
     messages: [
       { id: "da1", who: "Ana Rivera", handle: "npub1qz…ops", initials: "AR", color: "#F7931A", time: "10:12", text: "Want to set up our 2-of-2 escrow for the contractor milestone?", signed: false, zaps: "" },
       { id: "da2", who: "Dana Klein", handle: "npub1dk…cfo", initials: "DK", color: "#C99A5B", time: "10:15", text: "Yes — funding it with 0.85 BTC now. Both of us co-sign to release.", signed: true, zaps: "" },
@@ -108,18 +101,7 @@ export const MOCK_CHATS: Chat[] = [
     members: 2,
     balanceBtc: "0.10",
     balanceUsd: "6,421",
-    tiers: [
-      {
-        id: "pair",
-        name: "Both parties",
-        short: "Pair",
-        minNeed: 2,
-        keys: [
-          { id: "dk", initials: "DK", name: "Dana Klein (you)", device: "CFO · Ledger Stax", status: "online" },
-          { id: "rb", initials: "RB", name: "Ravi Bose", device: "Board Chair · Tapsigner", status: "online" },
-        ],
-      },
-    ],
+    tiers: [],
     messages: [
       { id: "dr1", who: "Ravi Bose", handle: "npub1rb…chr", initials: "RB", color: "#C99A5B", time: "Yesterday", text: "Quick 1:1 before the board call — all good on the reserve audit.", signed: false, zaps: "" },
     ],
@@ -232,6 +214,7 @@ export function buildLiveVault(state: WalletState): Chat {
     balanceBtc: "100.13",
     balanceUsd: "6,429,287",
     live: true,
+    vaultStatus: "active",
     receiveAddress: demo.receive_address,
     groupKey: demo.group_xonly_public_key,
     tiers,

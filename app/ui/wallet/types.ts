@@ -48,7 +48,13 @@ export type Chat = {
   balanceUsd: string;
   /** When true, this vault is backed by the real DKGKit crate. */
   live?: boolean;
-  /** Real Taproot receive address (live vault only). */
+  /**
+   * Vault provisioning state. `undefined` = chat only (no shared vault, e.g. a
+   * plain DM); `"pending"` = vault created, DKG/address being provisioned;
+   * `"active"` = receive address available.
+   */
+  vaultStatus?: "pending" | "active";
+  /** Real Taproot receive address (set once the vault is provisioned). */
   receiveAddress?: string;
   /** Real group x-only public key (live vault only). */
   groupKey?: string;
