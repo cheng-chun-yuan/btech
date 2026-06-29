@@ -96,6 +96,11 @@ export default function Wallet() {
     setAudit({ entries: ((await res.json()) as { entries: AuditEntryUI[] }).entries });
   }, []);
 
+  const onLogout = useCallback(async () => {
+    await fetch("/api/auth/logout", { method: "POST" });
+    window.location.href = "/login";
+  }, []);
+
   // Load persisted chats/approvals/identity plus the real DKGKit vault state,
   // and fold the live vault in on top.
   useEffect(() => {
@@ -410,6 +415,21 @@ export default function Wallet() {
               <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.green, boxShadow: "0 0 0 3px rgba(63,185,80,.16)" }} />
               BTC ${BTC_USD.toLocaleString("en-US")}
             </div>
+            {me && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${C.line2}`, borderRadius: 9, padding: "6px 8px 6px 12px", fontSize: 12.5, color: "#9CA1A7" }}>
+                <span>
+                  {me.label}
+                  {me.participant_id != null ? (
+                    <span style={{ color: C.green }}> · signer #{me.participant_id}</span>
+                  ) : (
+                    <span style={{ color: C.faint }}> · observer</span>
+                  )}
+                </span>
+                <button onClick={onLogout} title="Sign out" style={{ background: "transparent", border: `1px solid ${C.line2}`, color: "#C5C9CE", borderRadius: 7, padding: "4px 9px", fontSize: 11.5, fontFamily: "inherit", cursor: "pointer" }}>
+                  Sign out
+                </button>
+              </div>
+            )}
             <button onClick={go("approvals")} style={{ display: "flex", alignItems: "center", gap: 9, background: C.orange, color: C.bg, border: "none", borderRadius: 9, padding: "9px 15px", fontSize: 13, fontWeight: 600, fontFamily: "inherit", cursor: "pointer" }}>
               New transfer
             </button>
@@ -453,6 +473,7 @@ export default function Wallet() {
           {view === "chat" && active && (
             <ChatDetail
               chat={active}
+              audit={audit}
               showVault={showVault}
               toggleVault={toggleVault}
               wstate={wstate}
@@ -807,6 +828,7 @@ function TabButton({ active, onClick, label, count }: { active: boolean; onClick
 
 function ChatDetail({
   chat,
+  audit,
   showVault,
   toggleVault,
   draft,
@@ -820,6 +842,7 @@ function ChatDetail({
   proposeKey,
 }: {
   chat: Chat;
+  audit: { entries?: AuditEntryUI[]; restricted?: boolean };
   showVault: boolean;
   toggleVault: () => void;
   wstate: WalletState | null;
@@ -912,8 +935,83 @@ function ChatDetail({
         {showVault && (
           <VaultPanel chat={chat} setThreshold={setThreshold} removeKey={removeKey} proposeKey={proposeKey} />
         )}
+        <AuditPanel audit={audit} />
       </div>
     </div>
+  );
+}
+
+// ===========================================================================
+// Audit panel — per-chat activity, visible to vault members only
+// ===========================================================================
+
+const AUDIT_GLYPH: Record<AuditEntryUI["action"], string> = {
+  sign: "✓",
+  propose: "◆",
+  message: "·",
+  join: "→",
+};
+const AUDIT_VERB: Record<AuditEntryUI["action"], string> = {
+  sign: "signed",
+  propose: "proposed",
+  message: "posted a message",
+  join: "joined",
+};
+
+function AuditPanel({ audit }: { audit: { entries?: AuditEntryUI[]; restricted?: boolean } }) {
+  return (
+    <aside
+      style={{
+        flex: "0 0 296px",
+        background: C.surface,
+        border: `1px solid ${C.line2}`,
+        borderRadius: 16,
+        padding: 16,
+        overflowY: "auto",
+        minHeight: 0,
+      }}
+    >
+      <div style={{ fontSize: 13, fontWeight: 600 }}>Audit log</div>
+      <div style={{ fontSize: 10.5, color: C.faint, marginTop: 2, marginBottom: 14 }}>
+        Visible to vault members only
+      </div>
+
+      {audit.restricted ? (
+        <div style={{ fontSize: 11.5, color: C.faint2, lineHeight: 1.5 }}>
+          🔒 Restricted to vault members. Sign in as a vault signer to view the activity trail.
+        </div>
+      ) : !audit.entries || audit.entries.length === 0 ? (
+        <div style={{ fontSize: 11.5, color: C.faint2 }}>No activity recorded yet.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {audit.entries.map((e) => (
+            <div key={e.id} style={{ display: "flex", gap: 9, fontSize: 11.5 }}>
+              <span
+                aria-hidden
+                style={{
+                  fontFamily: MONO,
+                  flex: "0 0 auto",
+                  color: e.action === "sign" ? C.green : e.action === "propose" ? C.orange : C.faint2,
+                }}
+              >
+                {AUDIT_GLYPH[e.action] ?? "·"}
+              </span>
+              <div style={{ minWidth: 0 }}>
+                <div>
+                  <span style={{ fontWeight: 600 }}>{e.actor_label}</span>{" "}
+                  <span style={{ color: C.muted }}>{AUDIT_VERB[e.action] ?? e.action}</span>
+                </div>
+                {e.detail && (
+                  <div style={{ color: C.faint2, fontSize: 10.5, marginTop: 2, wordBreak: "break-word" }}>
+                    {e.detail}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </aside>
   );
 }
 
