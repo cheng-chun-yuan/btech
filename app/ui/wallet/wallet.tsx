@@ -78,7 +78,7 @@ export default function Wallet() {
   const [showVault, setShowVault] = useState(false);
   const [tab, setTab] = useState<Tab>("send");
   const [draft, setDraft] = useState("");
-  const [sendForm, setSendForm] = useState({ open: false, module: "Bitcoin mainnet", dest: "", amount: "" });
+  const [sendForm, setSendForm] = useState({ open: false, module: "Bitcoin regtest", dest: "", amount: "" });
 
   const [chats, setChats] = useState<Chat[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
@@ -287,7 +287,7 @@ export default function Wallet() {
     if (!text || !activeChat) return;
     if (text.toLowerCase() === "/send") {
       setDraft("");
-      setSendForm({ open: true, module: "Bitcoin mainnet", dest: "", amount: "" });
+      setSendForm({ open: true, module: "Bitcoin regtest", dest: "", amount: "" });
       return;
     }
     const cid = activeChat;
@@ -321,7 +321,7 @@ export default function Wallet() {
     const usd = Math.round(amt * BTC_USD).toLocaleString("en-US");
     const cid = activeChat;
     const module = sendForm.module;
-    setSendForm({ open: false, module: "Bitcoin mainnet", dest: "", amount: "" });
+    setSendForm({ open: false, module: "Bitcoin regtest", dest: "", amount: "" });
     const proposal: Approval = {
       id: `tx${Date.now()}`,
       kind: "send",
@@ -899,18 +899,18 @@ function ChatDetail({
               <div style={{ background: "#0E1014", border: "1px solid rgba(247,147,26,.3)", borderRadius: 12, padding: 14, marginBottom: 12 }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
                   <span style={{ fontSize: 12.5, fontWeight: 600, color: C.orange }}>Propose a BTC transfer</span>
-                  <button onClick={() => setSendForm({ open: false, module: "Bitcoin mainnet", dest: "", amount: "" })} title="Cancel" style={{ width: 22, height: 22, border: "none", background: "transparent", color: C.faint2, fontSize: 16, cursor: "pointer", fontFamily: "inherit" }}>×</button>
+                  <button onClick={() => setSendForm({ open: false, module: "Bitcoin regtest", dest: "", amount: "" })} title="Cancel" style={{ width: 22, height: 22, border: "none", background: "transparent", color: C.faint2, fontSize: 16, cursor: "pointer", fontFamily: "inherit" }}>×</button>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   <Field label="CHAIN / MODULE">
                     <select value={sendForm.module} onChange={(e) => setSendForm({ ...sendForm, module: e.target.value })} style={inputStyle}>
-                      <option>Bitcoin mainnet</option>
+                      <option>Bitcoin regtest</option>
                       <option>Lightning</option>
                       <option>Liquid</option>
                     </select>
                   </Field>
                   <Field label="DESTINATION">
-                    <input value={sendForm.dest} onChange={(e) => setSendForm({ ...sendForm, dest: e.target.value })} placeholder="bc1q… address or invoice" style={{ ...inputStyle, fontFamily: MONO }} />
+                    <input value={sendForm.dest} onChange={(e) => setSendForm({ ...sendForm, dest: e.target.value })} placeholder="bcrt1q… address or invoice" style={{ ...inputStyle, fontFamily: MONO }} />
                   </Field>
                   <Field label="AMOUNT (BTC)">
                     <input value={sendForm.amount} onChange={(e) => setSendForm({ ...sendForm, amount: e.target.value })} inputMode="decimal" placeholder="0.00" style={{ ...inputStyle, fontFamily: MONO }} />
@@ -922,7 +922,7 @@ function ChatDetail({
               </div>
             )}
             <div style={{ display: "flex", gap: 8, alignItems: "center", background: C.surface2, border: "1px solid rgba(255,255,255,.08)", borderRadius: 11, padding: "6px 6px 6px 8px" }}>
-              <button onClick={() => setSendForm({ open: true, module: "Bitcoin mainnet", dest: "", amount: "" })} title="Propose a BTC transfer" style={{ flex: "0 0 auto", width: 34, height: 34, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "rgba(247,147,26,.14)", color: C.orange, borderRadius: 8, cursor: "pointer", fontFamily: MONO, fontSize: 17, fontWeight: 700 }}>₿</button>
+              <button onClick={() => setSendForm({ open: true, module: "Bitcoin regtest", dest: "", amount: "" })} title="Propose a BTC transfer" style={{ flex: "0 0 auto", width: 34, height: 34, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "rgba(247,147,26,.14)", color: C.orange, borderRadius: 8, cursor: "pointer", fontFamily: MONO, fontSize: 17, fontWeight: 700 }}>₿</button>
               <input value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); onSendMsg(); } }} placeholder={`Message ${chat.name}`} style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", outline: "none", color: C.ink, fontSize: 13, fontFamily: "inherit" }} />
               <button onClick={onSendMsg} style={{ flex: "0 0 auto", background: C.orange, border: "none", color: C.bg, fontSize: 13, fontWeight: 600, fontFamily: "inherit", padding: "8px 18px", borderRadius: 8, cursor: "pointer" }}>Send</button>
             </div>
