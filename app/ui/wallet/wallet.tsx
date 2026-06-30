@@ -610,6 +610,11 @@ export default function Wallet() {
         return;
       }
       const memberNpubs = members.map((m) => m.npub);
+      const others = memberNpubs.filter((n) => n !== me?.npub);
+      if (others.length === 0) {
+        setStateError("No recipients yet — the member list is still loading. Try again in a moment.");
+        return;
+      }
       try {
         await client.publish(cid, scopeFor(chat.type), memberNpubs, text);
       } catch (e) {
@@ -687,18 +692,20 @@ export default function Wallet() {
       const created = res.ok ? ((await res.json()) as { approval: Approval }).approval : proposal;
       setApprovals((prev) => [created, ...prev]);
 
-      const mres = await fetch("/api/messages", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chatId: cid, text: announce }),
-      });
-      if (mres.ok) {
-        const { message } = (await mres.json()) as { message: ChatMessage };
-        setChats((prev) =>
-          prev.map((c) => (c.id === cid ? { ...c, messages: [...c.messages, message] } : c)),
-        );
+      const relayClient = chatClientRef.current;
+      if (relayClient) {
+        const memberNpubs = members.map((m) => m.npub);
+        const others = memberNpubs.filter((n) => n !== me?.npub);
+        if (others.length > 0) {
+          try {
+            await relayClient.publish(cid, scopeFor(chat.type), memberNpubs, announce);
+          } catch {
+            // best-effort; the approval was already created
+          }
+        }
       }
-      void refreshAudit(cid);
+      // Metadata-only audit ping (no content); best-effort.
+      void fetch(`/api/chats/${cid}/audit`, { method: "POST" }).then(() => refreshAudit(cid));
     })();
   };
 
