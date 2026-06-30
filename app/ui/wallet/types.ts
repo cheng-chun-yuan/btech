@@ -71,6 +71,10 @@ export type Chat = {
 export type ApprovalStatus = "pending" | "ready" | "broadcast" | "rejected";
 export type ApprovalKind = "send" | "role";
 
+/** One signer the proposer picked for an approval. Its participantId aligns
+ * with the Rust signer_set and the `signers` table; npub gates who may sign. */
+export type SelectedSigner = { participantId: number; npub: string; label: string };
+
 export type Approval = {
   id: string;
   kind: ApprovalKind;
@@ -91,6 +95,9 @@ export type Approval = {
   policy: string;
   threshold: number;
   total: number;
+  /** The exact signers the proposer assembled. Length is the threshold; all
+   * must sign. Absent on legacy/no-roster approvals (existing flow applies). */
+  signerSet?: SelectedSigner[];
   signed: number;
   youSigned: boolean;
   status: ApprovalStatus;
