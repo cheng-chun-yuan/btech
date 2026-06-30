@@ -349,6 +349,40 @@ impl WalletApp {
         })
     }
 
+    /// Reshare the vault to a new grouped policy, authorized by `ratifier_set`
+    /// (participant ids valid under the CURRENT policy). Returns the unchanged
+    /// group key + address plus the ratifier authorization proof. `binding_id` is
+    /// the approval id, not a cryptographic nonce.
+    pub fn reshare(
+        &mut self,
+        binding_id: &str,
+        new_grouped: dkgkit_sdk::GroupedThresholdConfig,
+        ratifier_set: Vec<u16>,
+        policy_fingerprint: &str,
+    ) -> anyhow::Result<DemoReport> {
+        self.init()?;
+        let ids = ratifier_set
+            .into_iter()
+            .map(ParticipantId::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        let signing = self
+            .vault
+            .reshare(binding_id, new_grouped, ids, policy_fingerprint)?;
+        let address = self.vault.derive_receive_address(0, 0, 0)?;
+        Ok(DemoReport {
+            vault_id: self.vault.vault_id.clone(),
+            network: self.vault.network.clone(),
+            group_xonly_public_key: self.vault.group_xonly_public_key_hex()?,
+            receive_path: address.path.display_path(),
+            receive_address: address.address,
+            signers: signing.signer_ids,
+            authorization_digest: signing.digest_hex,
+            aggregate_signature: signing.signature_hex,
+            verified: signing.verified,
+            remaining_relay_events: self.vault.remaining_relay_events(),
+        })
+    }
+
     pub fn repository(&self) -> &InMemoryRepository {
         &self.repository
     }
@@ -451,6 +485,190 @@ mod tests {
         assert!(app
             .htss_finalize("tx-su", "tx-su", "bcrt1qx", 1, "m", set)
             .is_err());
+    }
+
+    #[test]
+    fn reshare_adds_a_signer_keeps_address_and_verifies() {
+        let mut app = WalletApp::demo().unwrap();
+        app.init().unwrap();
+
+        // Capture the group key + receive address from the REAL vault accessors
+        // (the same ones DemoReport / vault_state surface) before resharing.
+        let group_before = app.vault.group_xonly_public_key_hex().unwrap();
+        let addr_before = app.vault.derive_receive_address(0, 0, 0).unwrap().address;
+
+        // New policy: the seed 1-2-3-of-2-3-5 plus a 6th operator (id 11) at rank 2,
+        // operator group requirement bumped from 3-of-5 to 3-of-6.
+        let new_grouped = crate::domain::policy::grouped_config_add_operator().unwrap();
+        let ratifiers: Vec<u16> = vec![1, 3, 4, 6, 7, 8]; // valid under the CURRENT policy
+
+        let report = app
+            .reshare("reshare-1", new_grouped, ratifiers.clone(), "fp-new-policy")
+            .unwrap();
+
+        assert!(report.verified, "ratifier aggregate must verify");
+        assert_eq!(
+            report.group_xonly_public_key, group_before,
+            "group key must be fixed across reshare"
+        );
+        assert_eq!(
+            report.receive_address, addr_before,
+            "receive address must be fixed across reshare"
+        );
+        assert_eq!(
+            report.signers, ratifiers,
+            "the authorization was signed by the current-policy ratifier quorum"
+        );
+
+        // The vault now signs a payment with a quorum that INCLUDES the new
+        // operator (id 11), valid only under the NEW 3-of-6 operator policy, and
+        // the aggregate must verify under the unchanged group key.
+        let pay_set: Vec<u16> = vec![1, 3, 4, 6, 7, 11];
+        for pid in &pay_set {
+            app.htss_precommit("pay-after-reshare", *pid).unwrap();
+        }
+        let pay = app
+            .htss_finalize(
+                "pay-after-reshare",
+                "pay-after-reshare",
+                "bcrt1qexample",
+                100_000,
+                "memo",
+                pay_set.clone(),
+            )
+            .unwrap();
+        assert!(
+            pay.verified,
+            "post-reshare quorum including the new operator must sign and verify"
+        );
+        assert_eq!(pay.signers, pay_set);
+        // The post-reshare payment is over the SAME unchanged group key + address.
+        assert_eq!(pay.group_xonly_public_key, group_before);
+        assert_eq!(pay.receive_address, addr_before);
+    }
+
+    #[test]
+    fn reshared_vault_survives_export_load_round_trip() {
+        // Reshare the vault to the 11-participant add-operator policy under a
+        // valid CURRENT-policy ratifier quorum, then prove the new key material
+        // survives the same export -> JSON -> load path vaultd persists with.
+        let mut app = WalletApp::demo().unwrap();
+        app.init().unwrap();
+
+        let new_grouped = crate::domain::policy::grouped_config_add_operator().unwrap();
+        let ratifiers: Vec<u16> = vec![1, 3, 4, 6, 7, 8]; // valid under the seed policy
+        app.reshare(
+            "reshare-persist",
+            new_grouped.clone(),
+            ratifiers,
+            "fp-new-policy",
+        )
+        .unwrap();
+
+        // Capture the POST-reshare group key + receive address.
+        let group_after = app.vault.group_xonly_public_key_hex().unwrap();
+        let addr_after = app.vault.derive_receive_address(0, 0, 0).unwrap().address;
+
+        // Persist exactly as vaultd's persist_vault does: export -> JSON -> reload.
+        let material = app
+            .export_vault()
+            .expect("reshared vault exports key material");
+        let json = serde_json::to_string(&material).unwrap();
+        let restored: crate::domain::vault::VaultKeyMaterial =
+            serde_json::from_str(&json).unwrap();
+        let reloaded = WalletApp::load(restored).unwrap();
+
+        // The reloaded vault carries the SAME group key + address as the
+        // post-reshare vault (the reshared key material persisted, not a re-DKG).
+        assert_eq!(
+            reloaded.vault.group_xonly_public_key_hex().unwrap(),
+            group_after,
+            "reloaded group key must match the post-reshare key"
+        );
+        assert_eq!(
+            reloaded.vault.derive_receive_address(0, 0, 0).unwrap().address,
+            addr_after,
+            "reloaded receive address must match the post-reshare address"
+        );
+
+        // Crucially, the reloaded policy is the NEW 11-participant add-operator
+        // config, NOT the 10-participant seed — the reshared policy survived the
+        // round trip (this is what `persist_vault` exists to guarantee).
+        assert_eq!(
+            reloaded.vault.grouped_config, new_grouped,
+            "reloaded vault must carry the NEW add-operator policy"
+        );
+        assert_ne!(
+            reloaded.vault.grouped_config,
+            crate::domain::policy::grouped_config_123_of_235().unwrap(),
+            "reloaded policy must NOT be the seed config"
+        );
+    }
+
+    #[test]
+    fn reshare_rejects_non_quorum_set_without_mutating_state() {
+        let mut app = WalletApp::demo().unwrap();
+        app.init().unwrap();
+
+        // Capture the group key + receive address from the REAL vault accessors
+        // BEFORE attempting an unauthorized reshare.
+        let group_before = app.vault.group_xonly_public_key_hex().unwrap();
+        let addr_before = app.vault.derive_receive_address(0, 0, 0).unwrap().address;
+
+        // Ratifier set [1, 3, 6, 7, 8] is demo_invalid_signer_set(): it carries
+        // only ONE manager (id 3) where the rank-1 group requires 2, so it is NOT
+        // a valid quorum under the CURRENT seed 1-2-3-of-2-3-5 policy. reshare MUST
+        // error and leave vault state completely unchanged.
+        let new_grouped = crate::domain::policy::grouped_config_add_operator().unwrap();
+        let result = app.reshare(
+            "reshare-neg-1",
+            new_grouped,
+            vec![1, 3, 6, 7, 8],
+            "fp-new-policy",
+        );
+        assert!(
+            result.is_err(),
+            "non-quorum ratifier set must error, not reshare the vault"
+        );
+
+        // No partial state mutation: group key + receive address byte-identical
+        // to the BEFORE captures.
+        let group_after = app.vault.group_xonly_public_key_hex().unwrap();
+        let addr_after = app.vault.derive_receive_address(0, 0, 0).unwrap().address;
+        assert_eq!(
+            group_after, group_before,
+            "group key must be unchanged after a failed reshare"
+        );
+        assert_eq!(
+            addr_after, addr_before,
+            "receive address must be unchanged after a failed reshare"
+        );
+
+        // Corruption check: the vault still signs a payment under the ORIGINAL
+        // policy. A valid old-policy quorum [1,3,4,6,7,8] precommits + finalizes,
+        // and the aggregate must verify under the unchanged group key.
+        let pay_set: Vec<u16> = vec![1, 3, 4, 6, 7, 8];
+        for pid in &pay_set {
+            app.htss_precommit("pay-after-failed-reshare", *pid).unwrap();
+        }
+        let pay = app
+            .htss_finalize(
+                "pay-after-failed-reshare",
+                "pay-after-failed-reshare",
+                "bcrt1qexample",
+                100_000,
+                "memo",
+                pay_set.clone(),
+            )
+            .unwrap();
+        assert!(
+            pay.verified,
+            "old-policy quorum must still sign and verify after the failed reshare"
+        );
+        assert_eq!(pay.signers, pay_set);
+        // The post-failure payment is over the SAME unchanged group key + address.
+        assert_eq!(pay.group_xonly_public_key, group_before);
+        assert_eq!(pay.receive_address, addr_before);
     }
 
     #[test]

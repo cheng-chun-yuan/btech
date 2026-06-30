@@ -7,9 +7,10 @@ use dkgkit_sdk::bitcoin::{
 use dkgkit_sdk::{
     aggregate_htss_signature_shares, aggregate_htss_signature_shares_for_output,
     hierarchical_config_from_grouped_threshold, htss_nonce, htss_sign_share,
-    htss_sign_share_for_output, validate_grouped_threshold_signer_set, DkgKitError,
+    htss_sign_share_for_output, reshare_htss, validate_grouped_threshold_signer_set, DkgKitError,
     FrostCoordinator, GroupKey, GroupedThresholdConfig, HtssDkgRound1State, HtssDkgService,
-    HtssLocalKeyShare, HtssLocalNonce, HtssNoncePackage, ParticipantId, Result, SessionId,
+    HtssLocalKeySet, HtssLocalKeyShare, HtssLocalNonce, HtssNoncePackage, ParticipantId, Result,
+    SessionId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -367,6 +368,76 @@ impl VaultService {
             signer_ids: signer_set.iter().map(|id| id.0).collect(),
             verified,
         })
+    }
+
+    /// Reshare the vault to `new_grouped`, authorized by `ratifier_set` (which
+    /// must be valid under the CURRENT policy). Produces a real aggregate over a
+    /// policy-change digest (proving the current quorum approved), then swaps in
+    /// the new shares/config. The group key — and thus the receive address — is
+    /// unchanged. `binding_id` is the approval id, NOT a cryptographic nonce.
+    ///
+    /// Atomicity: every fallible step (authorization, config conversion, reshare,
+    /// group-key check, rebuilding the DKG service) runs BEFORE any field of
+    /// `self` is mutated. On any error, `self` is left completely unmutated.
+    pub fn reshare(
+        &mut self,
+        binding_id: &str,
+        new_grouped: GroupedThresholdConfig,
+        ratifier_set: Vec<ParticipantId>,
+        policy_fingerprint: &str,
+    ) -> anyhow::Result<SigningResult> {
+        // 1. Authorize: the ratifiers sign the policy-change digest with the
+        //    CURRENT key material. Reuses the same single-shot grouped HTSS round
+        //    payments use, but over the reshare digest. `sign_approval` validates
+        //    the set against the CURRENT `grouped_config` and BIP340-verifies the
+        //    aggregate, so it fails if the set is not a valid current-policy quorum.
+        let approval = ApprovalRequest::policy_change(
+            binding_id.to_string(),
+            self.network.clone(),
+            policy_fingerprint.to_string(),
+        );
+        let authorization = self.sign_approval(binding_id, &approval, ratifier_set.clone())?;
+        anyhow::ensure!(
+            authorization.verified,
+            "policy-change authorization signature failed verification"
+        );
+
+        // 2. Reshare the key material to the new policy (group key fixed). All of
+        //    this is computed into locals — `self` is NOT touched yet.
+        let group_key = self
+            .group_key
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("vault DKG is not finalized"))?;
+        let old_htss = hierarchical_config_from_grouped_threshold(&self.grouped_config)?;
+        let new_htss = hierarchical_config_from_grouped_threshold(&new_grouped)?;
+        let old_set = HtssLocalKeySet {
+            group_key: group_key.clone(),
+            shares: self.local_shares.values().cloned().collect(),
+        };
+        let resharded = reshare_htss(&old_set, &old_htss, &ratifier_set, &new_htss)?;
+        anyhow::ensure!(
+            resharded.group_key.xonly_public_key == group_key.xonly_public_key,
+            "reshare changed the group key"
+        );
+
+        // Build the replacement DKG service and share map up front: these are the
+        // last fallible / allocating steps, so doing them BEFORE the swap keeps the
+        // swap itself infallible — `self` can never be left half-updated.
+        let new_dkg = HtssDkgService::new(self.dkg.session_id.0.clone(), new_htss)?;
+        let new_local_shares: BTreeMap<ParticipantId, HtssLocalKeyShare> = resharded
+            .shares
+            .into_iter()
+            .map(|share| (share.participant_id, share))
+            .collect();
+
+        // 3. Atomic swap: every assignment below is infallible, so the vault moves
+        //    from the old policy to the new one in one indivisible step.
+        self.local_shares = new_local_shares;
+        self.dkg = new_dkg;
+        self.grouped_config = new_grouped;
+        self.sign_sessions.clear(); // old in-flight signing sessions are now stale
+
+        Ok(authorization)
     }
 
     /// Sign a Taproot key-path spend sighash with the vault's BIP86 receive key.
