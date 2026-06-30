@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { openTestDb } from "./db";
 import { policyConfigToWire } from "./btech";
 import { isBrickedPolicy } from "../approvals/policy-validate";
+import { policyToDisplayTiers } from "../approvals/policy-mirror";
 
 describe("reshare schema", () => {
   it("schema version is at least 9", () => {
@@ -77,5 +78,51 @@ describe("isBrickedPolicy", () => {
         ],
       }),
     ).toBe(false);
+  });
+});
+
+describe("policyToDisplayTiers", () => {
+  it("mirrors a 2-tier PolicyConfig into display tiers (minNeed + keys shape)", () => {
+    const tiers = policyToDisplayTiers({
+      tiers: [
+        {
+          id: "t0",
+          name: "C-level",
+          rank: 0,
+          required: 1,
+          signers: [
+            { participantId: 1, npub: "n1", label: "Alice", rank: 0 },
+            { participantId: 2, npub: "n2", label: "Bob", rank: 0 },
+          ],
+        },
+        {
+          id: "t1",
+          name: "Operators",
+          rank: 2,
+          required: 3,
+          signers: [{ participantId: 6, npub: "n6", label: "Omar", rank: 2 }],
+        },
+      ],
+    });
+
+    expect(tiers).toEqual([
+      {
+        id: "t0",
+        name: "C-level",
+        short: "C-L",
+        minNeed: 1,
+        keys: [
+          { id: "k1", initials: "AL", name: "Alice", device: "Active", status: "online" },
+          { id: "k2", initials: "BO", name: "Bob", device: "Active", status: "online" },
+        ],
+      },
+      {
+        id: "t1",
+        name: "Operators",
+        short: "OPE",
+        minNeed: 3,
+        keys: [{ id: "k6", initials: "OM", name: "Omar", device: "Active", status: "online" }],
+      },
+    ]);
   });
 });

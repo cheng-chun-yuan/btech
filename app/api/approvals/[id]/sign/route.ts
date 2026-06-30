@@ -4,8 +4,16 @@ import { cookies } from "next/headers";
 import { getDb } from "../../../_lib/db";
 import { getSessionUser, SESSION_COOKIE } from "../../../_lib/auth";
 import { recordAudit, resolveChatId } from "../../../_lib/audit";
-import { runSignApproval, runPrecommit, runFinalize, VAULTD_CONFIGURED } from "../../../_lib/btech";
+import {
+  runSignApproval,
+  runPrecommit,
+  runFinalize,
+  runReshare,
+  policyConfigToWire,
+  VAULTD_CONFIGURED,
+} from "../../../_lib/btech";
 import { isSelectedSigner, signedNpubs, allSelectedSigned } from "../../../_lib/governance";
+import { policyToDisplayTiers } from "../../policy-mirror";
 import type { Approval, SigningProof } from "../../../../ui/wallet/types";
 
 export const runtime = "nodejs";
@@ -99,52 +107,153 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
   // its threshold signature after enough distinct signers have approved.
   let proof: SigningProof | undefined = approval.proof;
   if (live && quorumReached && !approval.proof?.verified) {
-    const recipient = approval.recipientAddress ?? approval.dest ?? "";
-    const amountSats = approval.amountSats ?? Math.round(parseFloat(approval.btc ?? "0") * 1e8);
-    try {
-      const report =
-        approval.signerSet && VAULTD_CONFIGURED
-          ? await runFinalize(
-              {
-                session: approval.id,
-                signerSet: approval.signerSet.map((s) => s.participantId),
-                recipient,
-                amountSats,
-                nonce: approval.id,
-                memo: approval.title,
-              },
-              auditChatId,
-            )
-          : await runSignApproval(
-              { recipient, amountSats, nonce: approval.id, memo: approval.title },
-              auditChatId,
-            );
-      if (!report.verified) throw new Error("aggregate signature failed verification");
-      proof = {
-        digest: report.authorization_digest,
-        signature: report.aggregate_signature,
-        groupKey: report.group_xonly_public_key,
-        signers: report.signers,
-        verified: report.verified,
-      };
-      // Stamp the completed aggregate onto the signature row that closed quorum.
-      db.prepare(
-        "UPDATE approval_signatures SET aggregate_signature = ? WHERE approval_id = ? AND npub = ?",
-      ).run(report.aggregate_signature, id, user.npub);
-    } catch (err) {
-      // Record the failed signing attempt in the audit trail, then surface it.
+    if (approval.kind === "role" && approval.proposedPolicy) {
+      // Policy-change RESHARE. A role approval carries a proposedPolicy but NO
+      // signerSet, so it skipped the selected-signer gate + the precommit round
+      // and reached quorum on DISTINCT current signers (signed >= threshold) —
+      // exactly the authority needed to ratify a key-share reshare. We re-share
+      // ONCE here, when the quorum-closing signer pushes it over the threshold.
+      const chatRow = db.prepare("SELECT data_json FROM chats WHERE id = ?").get(auditChatId) as
+        | { data_json: string }
+        | undefined;
+      const chat = chatRow ? JSON.parse(chatRow.data_json) : { policyVersion: 0 };
+      const liveVersion: number = chat.policyVersion ?? 0;
+
+      // Lost-update guard: the proposal must target the policy version it was
+      // authored against. If the live policy moved on (another reshare landed
+      // first), reject so the proposer re-proposes against the current policy.
+      if ((approval.basePolicyVersion ?? 0) !== liveVersion) {
+        recordAudit(db, {
+          chatId: auditChatId,
+          actorNpub: user.npub,
+          actorLabel: user.label,
+          action: "reshare",
+          outcome: "failed",
+          detail: `${approval.title}: policy changed since proposed (v${approval.basePolicyVersion ?? 0} ≠ v${liveVersion})`,
+        });
+        return NextResponse.json(
+          { error: "Policy changed since this was proposed. Re-propose against the current policy." },
+          { status: 409 },
+        );
+      }
+
+      try {
+        // Ratifier set = the DISTINCT signers who actually voted (all current
+        // signers). Resolve each voter npub to its Rust participant id.
+        const voters = (
+          db.prepare("SELECT npub FROM approval_signatures WHERE approval_id = ?").all(id) as {
+            npub: string;
+          }[]
+        ).map((r) => r.npub);
+        const signerSet = voters
+          .map(
+            (n) =>
+              (
+                db.prepare("SELECT participant_id FROM signers WHERE npub = ? LIMIT 1").get(n) as
+                  | { participant_id: number }
+                  | undefined
+              )?.participant_id,
+          )
+          .filter((x): x is number => typeof x === "number");
+
+        const wire = policyConfigToWire(approval.proposedPolicy);
+        const report = await runReshare(
+          { session: approval.id, signerSet, newConfig: wire, policyFingerprint: JSON.stringify(wire) },
+          auditChatId,
+        );
+        if (!report.verified) throw new Error("reshare authorization failed verification");
+        proof = {
+          digest: report.authorization_digest,
+          signature: report.aggregate_signature,
+          groupKey: report.group_xonly_public_key,
+          signers: report.signers,
+          verified: report.verified,
+        };
+
+        // Mirror the new authoritative policy into the chat + bump policyVersion.
+        // A reshare rotates key shares, not the group key, so the receive address
+        // is unchanged — only the displayed tiers + version advance.
+        const mirrored = {
+          ...chat,
+          tiers: policyToDisplayTiers(approval.proposedPolicy),
+          policyVersion: liveVersion + 1,
+        };
+        db.prepare("UPDATE chats SET data_json = ? WHERE id = ?").run(
+          JSON.stringify(mirrored),
+          auditChatId,
+        );
+      } catch (err) {
+        recordAudit(db, {
+          chatId: auditChatId,
+          actorNpub: user.npub,
+          actorLabel: user.label,
+          action: "reshare",
+          outcome: "failed",
+          detail: `${approval.title}: ${err instanceof Error ? err.message : "reshare failed"}`,
+        });
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : "Reshare failed" },
+          { status: 502 },
+        );
+      }
+
       recordAudit(db, {
         chatId: auditChatId,
         actorNpub: user.npub,
         actorLabel: user.label,
-        action: "sign",
-        outcome: "failed",
-        detail: `${approval.title}: ${err instanceof Error ? err.message : "signing failed"}`,
+        action: "reshare",
+        outcome: "success",
+        detail: `${approval.title}: policy reshared, address unchanged (v${liveVersion + 1})`,
       });
-      return NextResponse.json(
-        { error: err instanceof Error ? err.message : "Signing failed" },
-        { status: 502 },
-      );
+    } else {
+      // Payment authorization — the existing grouped HTSS round (unchanged).
+      const recipient = approval.recipientAddress ?? approval.dest ?? "";
+      const amountSats = approval.amountSats ?? Math.round(parseFloat(approval.btc ?? "0") * 1e8);
+      try {
+        const report =
+          approval.signerSet && VAULTD_CONFIGURED
+            ? await runFinalize(
+                {
+                  session: approval.id,
+                  signerSet: approval.signerSet.map((s) => s.participantId),
+                  recipient,
+                  amountSats,
+                  nonce: approval.id,
+                  memo: approval.title,
+                },
+                auditChatId,
+              )
+            : await runSignApproval(
+                { recipient, amountSats, nonce: approval.id, memo: approval.title },
+                auditChatId,
+              );
+        if (!report.verified) throw new Error("aggregate signature failed verification");
+        proof = {
+          digest: report.authorization_digest,
+          signature: report.aggregate_signature,
+          groupKey: report.group_xonly_public_key,
+          signers: report.signers,
+          verified: report.verified,
+        };
+        // Stamp the completed aggregate onto the signature row that closed quorum.
+        db.prepare(
+          "UPDATE approval_signatures SET aggregate_signature = ? WHERE approval_id = ? AND npub = ?",
+        ).run(report.aggregate_signature, id, user.npub);
+      } catch (err) {
+        // Record the failed signing attempt in the audit trail, then surface it.
+        recordAudit(db, {
+          chatId: auditChatId,
+          actorNpub: user.npub,
+          actorLabel: user.label,
+          action: "sign",
+          outcome: "failed",
+          detail: `${approval.title}: ${err instanceof Error ? err.message : "signing failed"}`,
+        });
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : "Signing failed" },
+          { status: 502 },
+        );
+      }
     }
   }
 
