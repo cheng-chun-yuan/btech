@@ -4,7 +4,8 @@ import { cookies } from "next/headers";
 import { getDb } from "../../../_lib/db";
 import { getSessionUser, SESSION_COOKIE } from "../../../_lib/auth";
 import { recordAudit, resolveChatId } from "../../../_lib/audit";
-import { runSignApproval } from "../../../_lib/btech";
+import { runSignApproval, runPrecommit, runFinalize, VAULTD_CONFIGURED } from "../../../_lib/btech";
+import { isSelectedSigner, signedNpubs, allSelectedSigned } from "../../../_lib/governance";
 import type { Approval, SigningProof } from "../../../../ui/wallet/types";
 
 export const runtime = "nodejs";
@@ -16,8 +17,8 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
   const user = getSessionUser(db, (await cookies()).get(SESSION_COOKIE)?.value);
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const row = db.prepare("SELECT id, data_json, is_live FROM approvals WHERE id = ?").get(id) as
-    | { id: string; data_json: string; is_live: number }
+  const row = db.prepare("SELECT id, data_json, is_live, status FROM approvals WHERE id = ?").get(id) as
+    | { id: string; data_json: string; is_live: number; status: string }
     | undefined;
   if (!row) return NextResponse.json({ error: "Unknown approval" }, { status: 404 });
 
@@ -43,21 +44,54 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     });
     return NextResponse.json({ error: "You are not a signer of this vault." }, { status: 403 });
   }
+  if (approval.signerSet && !isSelectedSigner(approval.signerSet, user.npub)) {
+    recordAudit(db, {
+      chatId: auditChatId,
+      actorNpub: user.npub,
+      actorLabel: user.label,
+      action: "sign",
+      outcome: "failed",
+      detail: `${approval.title}: not a selected signer for this approval`,
+    });
+    return NextResponse.json({ error: "You are not a selected signer for this approval." }, { status: 403 });
+  }
 
-  // Record THIS signer's approval — one vote per npub (the table's primary key
-  // dedups, so signing twice is a no-op). The aggregate is filled in later, and
-  // only once, when the quorum is reached and the grouped round actually runs.
+  // Round 1 (collapsed two-round): a selected signer pre-commits their nonce as
+  // they approve. The secret nonce stays in vaultd; we store only the public
+  // package. Falls through to a plain vote when vaultd/ signerSet is absent.
+  let precommitJson: string | null = null;
+  if (live && approval.signerSet && VAULTD_CONFIGURED) {
+    try {
+      const pc = await runPrecommit(
+        { session: approval.id, participantId: signer.participant_id },
+        auditChatId,
+      );
+      precommitJson = JSON.stringify(pc.nonce_package);
+    } catch (err) {
+      recordAudit(db, {
+        chatId: auditChatId,
+        actorNpub: user.npub,
+        actorLabel: user.label,
+        action: "sign",
+        outcome: "failed",
+        detail: `${approval.title}: pre-commit failed`,
+      });
+      return NextResponse.json({ error: err instanceof Error ? err.message : "pre-commit failed" }, { status: 502 });
+    }
+  }
   db.prepare(`
-    INSERT OR IGNORE INTO approval_signatures (approval_id, npub, aggregate_signature, signed_at)
-    VALUES (?, ?, NULL, ?)
-  `).run(id, user.npub, Date.now());
+    INSERT OR IGNORE INTO approval_signatures (approval_id, npub, aggregate_signature, precommit, signed_at)
+    VALUES (?, ?, NULL, ?, ?)
+  `).run(id, user.npub, precommitJson, Date.now());
 
   // Quorum is counted by DISTINCT SIGNERS who have approved — not by the size of
   // the crypto round — so the bar fills one signer at a time, across users.
   const signed = (
     db.prepare("SELECT COUNT(*) c FROM approval_signatures WHERE approval_id = ?").get(id) as { c: number }
   ).c;
-  const quorumReached = signed >= approval.threshold;
+  const quorumReached = approval.signerSet
+    ? allSelectedSigned(approval.signerSet, signedNpubs(db, id))
+    : signed >= approval.threshold;
 
   // Run the real grouped HTSS round ONCE — when the last required signer pushes
   // the approval over its threshold (and the aggregate hasn't already been
@@ -68,10 +102,23 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     const recipient = approval.recipientAddress ?? approval.dest ?? "";
     const amountSats = approval.amountSats ?? Math.round(parseFloat(approval.btc ?? "0") * 1e8);
     try {
-      const report = await runSignApproval(
-        { recipient, amountSats, nonce: approval.id, memo: approval.title },
-        auditChatId, // sign with this vault's own key
-      );
+      const report =
+        approval.signerSet && VAULTD_CONFIGURED
+          ? await runFinalize(
+              {
+                session: approval.id,
+                signerSet: approval.signerSet.map((s) => s.participantId),
+                recipient,
+                amountSats,
+                nonce: approval.id,
+                memo: approval.title,
+              },
+              auditChatId,
+            )
+          : await runSignApproval(
+              { recipient, amountSats, nonce: approval.id, memo: approval.title },
+              auditChatId,
+            );
       if (!report.verified) throw new Error("aggregate signature failed verification");
       proof = {
         digest: report.authorization_digest,
@@ -104,12 +151,13 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
   // Ready only when the quorum is met AND — for live vaults — the aggregate has
   // verified. A pending approval stays pending until the last signer signs.
   const ready = quorumReached && (!live || !!proof?.verified);
+  const currentStatus = approval.status ?? row.status;
   const updated: Approval = {
     ...approval,
     signed,
     youSigned: true,
     proof: proof ?? approval.proof,
-    status: ready ? "ready" : approval.status,
+    status: ready ? "ready" : currentStatus,
   };
   db.prepare("UPDATE approvals SET data_json = ?, status = ? WHERE id = ?")
     .run(JSON.stringify(updated), updated.status, id);
