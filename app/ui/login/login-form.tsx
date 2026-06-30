@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { nip19, finalizeEvent } from "nostr-tools";
 import type { Event, EventTemplate } from "nostr-tools";
+import { stashSecretKey } from "../wallet/nostr-signer";
 
 type Persona = { npub: string; label: string; role: string; participant_id: number };
 
@@ -31,15 +32,6 @@ const C = {
   red: "#F0616D",
 };
 const MONO = "'JetBrains Mono', monospace";
-
-declare global {
-  interface Window {
-    nostr?: {
-      getPublicKey(): Promise<string>;
-      signEvent(event: EventTemplate): Promise<Event>;
-    };
-  }
-}
 
 export default function LoginForm() {
   const [personas, setPersonas] = useState<Persona[]>([]);
@@ -93,6 +85,7 @@ export default function LoginForm() {
       setError("Invalid nsec");
       return;
     }
+    stashSecretKey(dec.data as Uint8Array);
     void submit(async (nonce) => finalizeEvent(challengeTemplate(nonce), dec.data as Uint8Array));
   }
 
