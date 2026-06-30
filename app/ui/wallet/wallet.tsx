@@ -161,6 +161,9 @@ export default function Wallet() {
   const [relayMsgs, setRelayMsgs] = useState<Record<string, DecryptedMessage[]>>({});
   const [relayConnected, setRelayConnected] = useState<boolean | null>(null);
   const chatClientRef = useRef<NostrChatClient | null>(null);
+  // Also held in state so the subscription effect can depend on the live client;
+  // the ref stays for imperative reads in sendMsg/submitSend.
+  const [chatClient, setChatClient] = useState<NostrChatClient | null>(null);
   const [chainTip, setChainTip] = useState<number | null>(null);
   const [activity, setActivity] = useState<ActivityRow[] | null>(null);
   const btcPrice = useBtcPrice();
@@ -450,16 +453,37 @@ export default function Wallet() {
     };
   }, [me]);
 
-  // Relay client lifecycle: (re)build when signer/me/chats change; subscribe to all chats.
+  // Relay client lifecycle: connect ONCE per signer/me. The pool persists across
+  // chat-set changes (only the subscription below refreshes), so opening a DM no
+  // longer tears down and reconnects the relay.
   useEffect(() => {
-    if (!signer || !me || chats.length === 0) return;
+    if (!signer || !me) return;
     let cancelled = false;
     const client = new NostrChatClient(signer, me.npub, relayUrl());
     chatClientRef.current = client;
+    setChatClient(client);
     void client.ensureConnected().then((ok) => { if (!cancelled) setRelayConnected(ok); });
+    return () => {
+      cancelled = true;
+      client.close();
+      chatClientRef.current = null;
+      setChatClient(null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signer, me?.npub]);
+
+  // Subscription: (re)subscribe to all chats on the EXISTING client whenever the
+  // chat-set or the known-author set changes. The old SubCloser is closed before
+  // the new one opens (effect cleanup runs first). Re-subscribing replays relay
+  // backfill, but the functional setRelayMsgs updater dedups by event id, so the
+  // pool itself is never reconnected on a chat switch.
+  const chatIdsKey = chats.map((c) => c.id).join(",");
+  const knownAuthorsKey = [me?.npub ?? "", ...chats.flatMap((c) => c.memberNpubs ?? [])].join(",");
+  useEffect(() => {
+    if (!chatClient || !me || chats.length === 0) return;
     const chatIds = chats.map((c) => c.id);
     const knownAuthors = new Set<string>([me.npub, ...chats.flatMap((c) => c.memberNpubs ?? [])]);
-    const sub = client.subscribe(chatIds, knownAuthors, (m) => {
+    const sub = chatClient.subscribe(chatIds, knownAuthors, (m) => {
       setRelayMsgs((prev) => {
         const list = prev[m.chatId] ?? [];
         if (list.some((x) => x.id === m.id)) return prev; // dedup
@@ -467,13 +491,10 @@ export default function Wallet() {
       });
     });
     return () => {
-      cancelled = true;
       sub.close();
-      client.close();
-      chatClientRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signer, me?.npub, chats.map((c) => c.id).join(",")]);
+  }, [chatClient, chatIdsKey, knownAuthorsKey]);
 
   // ---- approval actions ----
   // All signing is persisted server-side. For live approvals the route runs a
