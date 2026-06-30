@@ -5,6 +5,8 @@
     "": {
       "name": "btech-dkgkit-next",
       "dependencies": {
+        "@noble/curves": "^2.0.1",
+        "@noble/hashes": "^2.0.0",
         "better-sqlite3": "^12.11.1",
         "next": "16.2.9",
         "nostr-tools": "^2.23.8",

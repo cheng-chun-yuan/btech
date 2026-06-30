@@ -10,6 +10,8 @@ export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const isPublic =
     pathname === "/login" ||
+    pathname === "/stealth" ||
+    pathname.startsWith("/api/stealth") ||
     pathname.startsWith("/api/auth/") ||
     pathname.startsWith("/_next/") ||
     pathname === "/favicon.ico";
