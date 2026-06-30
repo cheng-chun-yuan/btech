@@ -10,6 +10,7 @@ import { buildLiveVault } from "./data";
 import { useBtcPrice } from "./use-btc-price";
 import { ProfilePopover } from "./profile-popover";
 import { resolveSigner, type NostrSigner } from "./nostr-signer";
+import { NostrChatClient, relayUrl, scopeFor, type DecryptedMessage } from "./nostr-chat";
 import type {
   Approval,
   Chat,
@@ -159,6 +160,8 @@ export default function Wallet() {
   const [members, setMembers] = useState<
     { npub: string; label: string; role: string; initials: string; color: string }[]
   >([]);
+  const [relayMsgs, setRelayMsgs] = useState<Record<string, DecryptedMessage[]>>({});
+  const chatClientRef = useRef<NostrChatClient | null>(null);
   const [chainTip, setChainTip] = useState<number | null>(null);
   const [activity, setActivity] = useState<ActivityRow[] | null>(null);
   const btcPrice = useBtcPrice();
@@ -440,6 +443,27 @@ export default function Wallet() {
       cancelled = true;
     };
   }, [me]);
+
+  // Relay client lifecycle: (re)build when signer/me/chats change; subscribe to all chats.
+  useEffect(() => {
+    if (!signer || !me || chats.length === 0) return;
+    const client = new NostrChatClient(signer, me.npub, relayUrl());
+    chatClientRef.current = client;
+    const chatIds = chats.map((c) => c.id);
+    const sub = client.subscribe(chatIds, (m) => {
+      setRelayMsgs((prev) => {
+        const list = prev[m.chatId] ?? [];
+        if (list.some((x) => x.id === m.id)) return prev; // dedup
+        return { ...prev, [m.chatId]: [...list, m].sort((a, b) => a.createdAt - b.createdAt) };
+      });
+    });
+    return () => {
+      sub.close();
+      client.close();
+      chatClientRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signer, me?.npub, chats.map((c) => c.id).join(",")]);
 
   // Decrypt the active DM's message history as messages arrive.
   useEffect(() => {
@@ -874,6 +898,8 @@ export default function Wallet() {
                 setPopover({ npub: mem.npub, name: mem.label, initials: mem.initials, color: mem.color, role: mem.role })
               }
               plain={plain}
+              relayMessages={relayMsgs[active.id] ?? []}
+              meNpub={me?.npub ?? ""}
             />
           )}
 
@@ -1352,6 +1378,8 @@ function ChatDetail({
   members,
   onMemberClick,
   plain,
+  relayMessages,
+  meNpub,
 }: {
   chat: Chat;
   audit: { entries?: AuditEntryUI[]; restricted?: boolean };
@@ -1377,6 +1405,8 @@ function ChatDetail({
   members: { npub: string; label: string; role: string; initials: string; color: string }[];
   onMemberClick: (m: { npub: string; label: string; role: string; initials: string; color: string }) => void;
   plain: Record<string, string>;
+  relayMessages: DecryptedMessage[];
+  meNpub: string;
 }) {
   const quorum = quorumOf(chat.tiers);
   const hasVault = !!chat.vaultStatus || chat.tiers.length > 0;
@@ -1417,34 +1447,29 @@ function ChatDetail({
       <div style={{ display: "flex", gap: 18, flex: 1, minHeight: 0 }}>
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", background: "#101216", border: `1px solid ${C.line2}`, borderRadius: 16, overflow: "hidden" }}>
           <div style={{ flex: 1, overflowY: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
-            {chat.messages.map((m) => (
-              <div key={m.id} style={{ display: "flex", gap: 12 }}>
-                <button
-                  type="button"
-                  onClick={() => m.authorNpub && onAuthorClick(m)}
-                  disabled={!m.authorNpub}
-                  title={m.authorNpub ? "View profile" : undefined}
-                  style={{ background: "none", border: "none", padding: 0, cursor: m.authorNpub ? "pointer" : "default" }}
-                >
-                  <span style={{ width: 34, height: 34, borderRadius: 10, background: m.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color: C.bg, flex: "0 0 34px" }}>{m.initials}</span>
-                </button>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
-                    <span
-                      onClick={() => m.authorNpub && onAuthorClick(m)}
-                      style={{ fontSize: 13, fontWeight: 600, cursor: m.authorNpub ? "pointer" : "default" }}
-                    >{m.who}</span>
-                    <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{m.handle}</span>
-                    <span style={{ fontSize: 10.5, color: C.faint }}>{m.time}</span>
-                    {m.signed && <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: ".3px", color: C.green, background: "rgba(63,185,80,.12)", padding: "2px 7px", borderRadius: 20 }}>SIGNED EVENT</span>}
+            {relayMessages.map((m) => {
+              const mem = members.find((x) => x.npub === m.authorNpub);
+              const who = m.authorNpub === meNpub ? "You" : mem?.label ?? `${m.authorNpub.slice(0, 12)}…`;
+              const initials = mem?.initials ?? (who === "You" ? "ME" : "??");
+              const color = mem?.color ?? "#6FB1FF";
+              return (
+                <div key={m.id} style={{ display: "flex", gap: 12 }}>
+                  <button
+                    type="button"
+                    onClick={() => onAuthorClick({ id: m.id, who, handle: "", initials, color, time: "", text: m.text, signed: false, zaps: "", authorNpub: m.authorNpub } as ChatMessage)}
+                    style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
+                  >
+                    <span style={{ width: 34, height: 34, borderRadius: 10, background: color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color: C.bg, flex: "0 0 34px" }}>{initials}</span>
+                  </button>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 13, fontWeight: 600 }}>{who}</span>
+                    </div>
+                    <div style={{ fontSize: 13, color: "#C5C9CE", lineHeight: 1.55, marginTop: 4 }}>{m.text}</div>
                   </div>
-                  <div style={{ fontSize: 13, color: "#C5C9CE", lineHeight: 1.55, marginTop: 4 }}>
-                    {chat.type === "direct" ? (plain[m.id] ?? "🔒 decrypting…") : m.text}
-                  </div>
-                  {m.zaps && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: C.sand, background: "rgba(247,147,26,.1)", padding: "3px 9px", borderRadius: 20, marginTop: 8, fontFamily: MONO }}>{m.zaps}</span>}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
           <div style={{ flex: "0 0 auto", borderTop: `1px solid ${C.line}`, padding: "14px 16px" }}>
             {hasVault && sendForm.open && (
