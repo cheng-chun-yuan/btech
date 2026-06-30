@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { openTestDb, seed } from "./db";
+import { openTestDb, seed, getDb } from "./db";
+import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
 
 describe("db", () => {
   it("creates all tables", () => {
@@ -32,5 +35,29 @@ describe("db", () => {
     const db = openTestDb();
     const msgs = db.prepare("SELECT COUNT(*) c FROM messages").get() as { c: number };
     expect(msgs.c).toBeGreaterThan(0);
+  });
+
+  it("getDb() provisions the subledger sl_* schema in the app database", () => {
+    const tmp = path.join(os.tmpdir(), `btech-sl-test-${process.pid}.db`);
+    // force a fresh, file-backed db (getDb caches on globalThis)
+    (globalThis as unknown as { __btechDb?: unknown }).__btechDb = undefined;
+    const prev = process.env.BTECH_DB;
+    process.env.BTECH_DB = tmp;
+    try {
+      const db = getDb();
+      const cfg = db.prepare("SELECT classification FROM sl_config WHERE asset='BTC'").get() as
+        | { classification: string }
+        | undefined;
+      expect(cfg?.classification).toBe("INTANGIBLE_IAS38");
+      // treasury tables still present alongside sl_* tables
+      const chats = db.prepare("SELECT COUNT(*) c FROM chats").get() as { c: number };
+      expect(chats.c).toBeGreaterThanOrEqual(0);
+      db.close();
+    } finally {
+      (globalThis as unknown as { __btechDb?: unknown }).__btechDb = undefined;
+      if (prev === undefined) delete process.env.BTECH_DB;
+      else process.env.BTECH_DB = prev;
+      for (const f of [tmp, `${tmp}-wal`, `${tmp}-shm`]) fs.rmSync(f, { force: true });
+    }
   });
 });

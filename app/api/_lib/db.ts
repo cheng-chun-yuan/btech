@@ -4,6 +4,7 @@ import fs from "node:fs";
 
 import { MOCK_CHATS, MOCK_APPROVALS } from "../../ui/wallet/data";
 import type { Chat } from "../../ui/wallet/types";
+import { migrateSubledger, seedConfig } from "./subledger";
 
 export type DB = Database.Database;
 
@@ -184,6 +185,8 @@ export function getDb(): DB {
   const db = new Database(file);
   migrate(db);
   seed(db);
+  migrateSubledger(db);
+  seedConfig(db);
   globalThis.__btechDb = db;
   return db;
 }
