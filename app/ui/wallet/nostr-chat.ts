@@ -44,10 +44,12 @@ export function isAddressedToMe(ev: Event, meHex: string): boolean {
   return ev.tags.some((t) => t[0] === "p" && t[1] === meHex);
 }
 
-export function parseChatEvent(ev: Event): { chatId: string; scope: string; authorNpub: string } | null {
+export function parseChatEvent(ev: Event): { chatId: string; scope: ChatScope; authorNpub: string } | null {
   const chatId = ev.tags.find((t) => t[0] === "t")?.[1];
-  const scope = ev.tags.find((t) => t[0] === "chat")?.[1];
-  if (!chatId || !scope) return null;
+  const rawScope = ev.tags.find((t) => t[0] === "chat")?.[1];
+  if (!chatId || !rawScope) return null;
+  if (rawScope !== "dm" && rawScope !== "group") return null;
+  const scope: ChatScope = rawScope;
   return { chatId, scope, authorNpub: npubFromHex(ev.pubkey) };
 }
 
@@ -75,18 +77,28 @@ export class NostrChatClient {
     this.meHex = pubHexFromNpub(meNpub);
   }
 
-  /** Fan-out: encrypt + sign + publish one kind-23333 event per recipient (incl self). */
+  /** Fan-out: encrypt + sign + publish one kind-23333 event per recipient (incl self).
+   * Skips unreachable recipients with a console.warn; throws only if every recipient fails. */
   async publish(chatId: string, scope: ChatScope, memberNpubs: string[], text: string): Promise<void> {
     const createdAt = Math.floor(Date.now() / 1000);
+    let attempted = 0;
+    let succeeded = 0;
     for (const recipient of fanoutRecipients(memberNpubs, this.meNpub)) {
-      const ciphertext = await this.signer.encrypt(recipient, text);
-      const ev = await this.signer.signEvent(
-        buildChatEventTemplate(chatId, scope, recipient, ciphertext, createdAt),
-      );
-      // publish() returns one promise per relay; succeed if any relay accepts.
-      await Promise.any(this.pool.publish(this.relays, ev)).catch(() => {
-        throw new Error("relay rejected the message");
-      });
+      attempted++;
+      try {
+        const ciphertext = await this.signer.encrypt(recipient, text);
+        const ev = await this.signer.signEvent(
+          buildChatEventTemplate(chatId, scope, recipient, ciphertext, createdAt),
+        );
+        // publish() returns one promise per relay; succeed if any relay accepts.
+        await Promise.any(this.pool.publish(this.relays, ev));
+        succeeded++;
+      } catch (err) {
+        console.warn(`[nostr-chat] publish: skipping recipient ${recipient}`, err);
+      }
+    }
+    if (attempted > 0 && succeeded === 0) {
+      throw new Error("relay rejected the message");
     }
   }
 
@@ -113,6 +125,16 @@ export class NostrChatClient {
       },
     });
     return { close: () => sub.close() };
+  }
+
+  /** Best-effort relay connectivity check for a UI status indicator. */
+  async ensureConnected(): Promise<boolean> {
+    try {
+      await this.pool.ensureRelay(this.relays[0]);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   close(): void {

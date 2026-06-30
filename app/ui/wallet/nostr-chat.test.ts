@@ -40,4 +40,18 @@ describe("nostr-chat helpers", () => {
     const parsed = parseChatEvent(ev);
     expect(parsed).toEqual({ chatId: "chatX", scope: "dm", authorNpub: npubOf(sender) });
   });
+
+  it("parseChatEvent returns null for an unknown chat scope", () => {
+    const sender = generateSecretKey();
+    const me = generateSecretKey();
+    // Manually build a template with an unknown scope tag value
+    const tmpl = {
+      kind: CHAT_KIND,
+      created_at: 1700000000,
+      tags: [["t", "chatX"], ["p", getPublicKey(me)], ["chat", "bogus"]],
+      content: "CIPHER",
+    };
+    const ev = finalizeEvent(tmpl, sender);
+    expect(parseChatEvent(ev)).toBeNull();
+  });
 });
