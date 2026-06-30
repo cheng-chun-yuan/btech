@@ -548,6 +548,64 @@ mod tests {
     }
 
     #[test]
+    fn reshared_vault_survives_export_load_round_trip() {
+        // Reshare the vault to the 11-participant add-operator policy under a
+        // valid CURRENT-policy ratifier quorum, then prove the new key material
+        // survives the same export -> JSON -> load path vaultd persists with.
+        let mut app = WalletApp::demo().unwrap();
+        app.init().unwrap();
+
+        let new_grouped = crate::domain::policy::grouped_config_add_operator().unwrap();
+        let ratifiers: Vec<u16> = vec![1, 3, 4, 6, 7, 8]; // valid under the seed policy
+        app.reshare(
+            "reshare-persist",
+            new_grouped.clone(),
+            ratifiers,
+            "fp-new-policy",
+        )
+        .unwrap();
+
+        // Capture the POST-reshare group key + receive address.
+        let group_after = app.vault.group_xonly_public_key_hex().unwrap();
+        let addr_after = app.vault.derive_receive_address(0, 0, 0).unwrap().address;
+
+        // Persist exactly as vaultd's persist_vault does: export -> JSON -> reload.
+        let material = app
+            .export_vault()
+            .expect("reshared vault exports key material");
+        let json = serde_json::to_string(&material).unwrap();
+        let restored: crate::domain::vault::VaultKeyMaterial =
+            serde_json::from_str(&json).unwrap();
+        let reloaded = WalletApp::load(restored).unwrap();
+
+        // The reloaded vault carries the SAME group key + address as the
+        // post-reshare vault (the reshared key material persisted, not a re-DKG).
+        assert_eq!(
+            reloaded.vault.group_xonly_public_key_hex().unwrap(),
+            group_after,
+            "reloaded group key must match the post-reshare key"
+        );
+        assert_eq!(
+            reloaded.vault.derive_receive_address(0, 0, 0).unwrap().address,
+            addr_after,
+            "reloaded receive address must match the post-reshare address"
+        );
+
+        // Crucially, the reloaded policy is the NEW 11-participant add-operator
+        // config, NOT the 10-participant seed — the reshared policy survived the
+        // round trip (this is what `persist_vault` exists to guarantee).
+        assert_eq!(
+            reloaded.vault.grouped_config, new_grouped,
+            "reloaded vault must carry the NEW add-operator policy"
+        );
+        assert_ne!(
+            reloaded.vault.grouped_config,
+            crate::domain::policy::grouped_config_123_of_235().unwrap(),
+            "reloaded policy must NOT be the seed config"
+        );
+    }
+
+    #[test]
     fn reshare_rejects_non_quorum_set_without_mutating_state() {
         let mut app = WalletApp::demo().unwrap();
         app.init().unwrap();

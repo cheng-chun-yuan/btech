@@ -55,6 +55,14 @@ struct FinalizeReq {
     memo: String,
 }
 
+#[derive(Deserialize)]
+struct ReshareReq {
+    session: String,
+    signer_set: Vec<u16>,
+    new_config: dkgkit_sdk::GroupedThresholdConfig,
+    policy_fingerprint: String,
+}
+
 fn err500(e: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
@@ -182,6 +190,49 @@ async fn vault_sign_finalize(
     Ok(Json(report))
 }
 
+/// Reshare the vault to a new grouped policy, authorized by a current-policy
+/// ratifier quorum. Unlike signing, reshare swaps key material, so the updated
+/// vault is re-persisted to disk afterwards (the new policy survives a restart).
+async fn vault_reshare(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<VaultQuery>,
+    Json(req): Json<ReshareReq>,
+) -> Result<Json<DemoReport>, (StatusCode, String)> {
+    let id = q.id.unwrap_or_else(|| "treasury".to_string());
+    let report = with_vault(&state, &id, |app| {
+        app.reshare(
+            &req.session,
+            req.new_config.clone(),
+            req.signer_set.clone(),
+            &req.policy_fingerprint,
+        )
+    })
+    .map_err(err500)?;
+
+    // `with_vault` has already released the vault-map lock here, so re-locking
+    // inside `persist_vault` cannot deadlock. Persist the reshared key material
+    // so the new policy survives a restart.
+    persist_vault(&state, &id).map_err(err500)?;
+    Ok(Json(report))
+}
+
+/// Write a vault's current key material to disk (used after a reshare swap).
+fn persist_vault(state: &AppState, id: &str) -> anyhow::Result<()> {
+    let map = state.vaults.lock().expect("vault map lock");
+    let app = map
+        .get(id)
+        .ok_or_else(|| anyhow::anyhow!("vault '{id}' not loaded"))?;
+    let material = app
+        .export_vault()
+        .ok_or_else(|| anyhow::anyhow!("vault '{id}' has no finalized key material"))?;
+    let path = vault_path(&state.data_dir, id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&material)?)?;
+    Ok(())
+}
+
 /// Build, sign, and return a broadcastable Taproot key-path spend out of the
 /// vault. The caller broadcasts the returned raw transaction.
 async fn vault_settle(
@@ -213,6 +264,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/vault/sign", post(vault_sign))
         .route("/vault/sign/precommit", post(vault_sign_precommit))
         .route("/vault/sign/finalize", post(vault_sign_finalize))
+        .route("/vault/reshare", post(vault_reshare))
         .route("/vault/settle", post(vault_settle))
         .with_state(state);
 
