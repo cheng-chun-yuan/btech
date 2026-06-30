@@ -26,7 +26,8 @@ export const MOCK_CHATS: Chat[] = [
     balanceBtc: "420.00",
     balanceUsd: "26,968,200",
     vaultStatus: "active",
-    receiveAddress: "bcrt1qc0ld5rsrv8q2k7p3m4n5j6h8g0f2d4s6a8c0ld",
+    // Real Taproot address is provisioned from its own DKG vault on first load
+    // (see app/api/chats/route.ts) so this channel is fundable like the treasury.
     tiers: [
       {
         id: "board",
@@ -56,7 +57,7 @@ export const MOCK_CHATS: Chat[] = [
     balanceBtc: "3.20",
     balanceUsd: "205,472",
     vaultStatus: "active",
-    receiveAddress: "bcrt1qpettyc4sh0ps2k7p3m4n5j6h8g0f2d4s6petty",
+    // Real Taproot address is provisioned from its own DKG vault on first load.
     tiers: [
       {
         id: "pops",
@@ -75,93 +76,12 @@ export const MOCK_CHATS: Chat[] = [
       { id: "p2", who: "Jin Lee", handle: "npub1jl…ctl", initials: "JL", color: "#B79BFF", time: "14:05", text: "Signed. Have a good trip.", signed: true, zaps: "" },
     ],
   },
-  {
-    id: "dm-ana",
-    type: "direct",
-    name: "Ana Rivera",
-    handle: "npub1qz…ops",
-    initials: "AR",
-    color: "#F7931A",
-    members: 2,
-    balanceBtc: "0.85",
-    balanceUsd: "54,578",
-    tiers: [],
-    messages: [
-      { id: "da1", who: "Ana Rivera", handle: "npub1qz…ops", initials: "AR", color: "#F7931A", time: "10:12", text: "Want to set up our 2-of-2 escrow for the contractor milestone?", signed: false, zaps: "" },
-      { id: "da2", who: "Dana Klein", handle: "npub1dk…cfo", initials: "DK", color: "#C99A5B", time: "10:15", text: "Yes — funding it with 0.85 BTC now. Both of us co-sign to release.", signed: true, zaps: "" },
-    ],
-  },
-  {
-    id: "dm-ravi",
-    type: "direct",
-    name: "Ravi Bose",
-    handle: "npub1rb…chr",
-    initials: "RB",
-    color: "#C99A5B",
-    members: 2,
-    balanceBtc: "0.10",
-    balanceUsd: "6,421",
-    tiers: [],
-    messages: [
-      { id: "dr1", who: "Ravi Bose", handle: "npub1rb…chr", initials: "RB", color: "#C99A5B", time: "Yesterday", text: "Quick 1:1 before the board call — all good on the reserve audit.", signed: false, zaps: "" },
-    ],
-  },
 ];
 
-// Mock approvals from other vaults (not backed by the live crate).
-export const MOCK_APPROVALS: Approval[] = [
-  {
-    id: "tx2",
-    kind: "send",
-    title: "Cold storage rebalance",
-    dest: "bcrt1q…c0ld",
-    destLabel: "Internal cold vault",
-    btc: "18.00",
-    usd: "1,155,780",
-    vault: "#cold-reserve",
-    time: "1h ago",
-    policy: "3/5 Board",
-    threshold: 5,
-    total: 5,
-    signed: 3,
-    youSigned: false,
-    status: "pending",
-  },
-  {
-    id: "tx3",
-    kind: "send",
-    title: "Payroll batch — June",
-    dest: "bcrt1q…p4yr",
-    destLabel: "Payroll module",
-    btc: "6.25",
-    usd: "401,312",
-    vault: "#ops-petty-cash",
-    time: "3h ago",
-    policy: "2/3 Ops",
-    threshold: 2,
-    total: 3,
-    signed: 2,
-    youSigned: true,
-    status: "ready",
-  },
-  {
-    id: "rc2",
-    kind: "role",
-    title: "Tighten reserve threshold",
-    changeLabel: "Threshold 3/5 → 4/5",
-    detail: "Stronger board control",
-    tier: "Board reserve",
-    requestedBy: "R. Bose",
-    vault: "#cold-reserve",
-    time: "2h ago",
-    policy: "3/5 Board",
-    threshold: 3,
-    total: 5,
-    signed: 1,
-    youSigned: false,
-    status: "pending",
-  },
-];
+// Approvals are user-created and stored in the DB (see POST /api/approvals);
+// there are no seeded approval fixtures. Use the "New transfer" flow to create
+// a real, live, broadcastable transfer.
+export const MOCK_APPROVALS: Approval[] = [];
 
 // ---------------------------------------------------------------------------
 // Live vault built from the real DKGKit backend state.
@@ -223,42 +143,6 @@ export function buildLiveVault(state: WalletState): Chat {
       { id: "m2", who: "Maya Ksiazek", handle: "npub1c8…ceo", initials: "MK", color: "#6FB1FF", time: "09:31", text: "Reviewed the destination, it is whitelisted. Signing from my Coldcard now.", signed: true, zaps: "" },
       { id: "m3", who: "BTech", handle: "dkgkit", initials: "₿", color: "#F7931A", time: "now", text: `This vault is live. Group key ${shortKey(demo.group_xonly_public_key)} · receive ${shortKey(demo.receive_address)} on ${demo.network}. Signing runs a real grouped HTSS round and verifies the aggregate Schnorr signature under BIP340.`, signed: true, zaps: "" },
     ],
-  };
-}
-
-/** Real policy string for the live vault, e.g. "1/2 + 2/3 + 3/5". */
-export function livePolicyString(state: WalletState): string {
-  return state.session.vault_policy_groups
-    .map((g) => `${g.required}/${g.total}`)
-    .join(" + ");
-}
-
-/** The live, backend-backed pending transfer that opens the Approvals view. */
-export function buildLiveApproval(state: WalletState): Approval {
-  const groups = state.session.vault_policy_groups;
-  const threshold = groups.reduce((a, g) => a + g.required, 0);
-  const total = groups.reduce((a, g) => a + g.total, 0);
-  const btc = 2.4;
-  const recipientAddress = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
-  return {
-    id: "tx1",
-    kind: "send",
-    title: "Vendor payment — Blockstream",
-    dest: "bcrt1q…f3t4",
-    destLabel: "Whitelisted vendor",
-    recipientAddress,
-    amountSats: Math.round(btc * 1e8),
-    btc: btc.toFixed(2),
-    usd: Math.round(btc * BTC_USD).toLocaleString("en-US"),
-    vault: "#treasury-ops",
-    time: "12m ago",
-    policy: livePolicyString(state),
-    threshold,
-    total,
-    signed: 1,
-    youSigned: false,
-    status: "pending",
-    live: true,
   };
 }
 

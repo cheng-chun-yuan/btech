@@ -50,7 +50,11 @@ async function loadPrice(): Promise<number> {
  * only if the request fails.
  */
 export function useBtcPrice(): number | null {
-  const [price, setPrice] = useState<number | null>(cached ?? readSession());
+  // Start null on first render so the server and client hydrate identically; the
+  // effect below fills in the cached/session/fetched price immediately after
+  // mount. Reading the cache here instead would desync SSR (no sessionStorage)
+  // from the client and trigger a hydration mismatch.
+  const [price, setPrice] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
     void loadPrice().then((p) => {

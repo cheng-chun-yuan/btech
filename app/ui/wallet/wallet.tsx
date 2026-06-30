@@ -1,12 +1,15 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
+import { finalizeEvent } from "nostr-tools";
+import type { EventTemplate } from "nostr-tools";
 
 import { ApprovalCard } from "./approval-card";
-import { buildLiveApproval, buildLiveVault } from "./data";
+import { buildLiveVault } from "./data";
 import { useBtcPrice } from "./use-btc-price";
+import { ProfilePopover } from "./profile-popover";
+import { resolveSigner, type NostrSigner } from "./nostr-signer";
 import type {
   Approval,
   Chat,
@@ -70,10 +73,67 @@ function statusLabelOf(k: SignerKey): string {
   return "Online";
 }
 
+// On-chain activity derived from /api/chain/activity (real esplora tx history).
+type ActivityApiEntry = {
+  txid: string;
+  address: string;
+  direction: "in" | "out";
+  deltaSats: number;
+  confirmed: boolean;
+  blockHeight: number | null;
+  blockTime: number | null;
+  txUrl: string;
+};
+type ActivityRow = ActivityApiEntry & { vault: string };
+
+function fmtBtc(sats: number): string {
+  return (Math.abs(sats) / 1e8).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 8,
+  });
+}
+function relTime(unixSec: number | null): string {
+  if (unixSec == null) return "pending";
+  const diff = Date.now() / 1000 - unixSec;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86_400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86_400)}d ago`;
+}
+
+// Demo persona switching. The login screen logs a persona in with one tap by
+// signing the challenge with a deterministic per-participant secret; we reuse
+// the exact same path from the sidebar so the demo can hop between signers
+// without re-entering a key. Real users still bring their own NIP-07/nsec.
+type Persona = { npub: string; label: string; role: string; participant_id: number };
+
+function challengeTemplate(nonce: string): EventTemplate {
+  return {
+    kind: 27235,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [["challenge", nonce]],
+    content: `btech-login:${nonce}`,
+  };
+}
+
+/** Same deterministic secret the server derives for a demo persona. */
+async function personaSecret(participantId: number): Promise<Uint8Array> {
+  const data = new TextEncoder().encode(`btech-signer-v1:${participantId}`);
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+}
+
+function initialsOf(label: string): string {
+  const parts = label.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
 export default function Wallet() {
   const [view, setView] = useState<View>("overview");
   const [activeChat, setActiveChat] = useState<string | null>(null);
   const [showVault, setShowVault] = useState(false);
+  const [showMembers, setShowMembers] = useState(false);
   const [tab, setTab] = useState<Tab>("send");
   const [draft, setDraft] = useState("");
   const [sendForm, setSendForm] = useState({ open: false, module: "Bitcoin regtest", dest: "", amount: "" });
@@ -85,8 +145,22 @@ export default function Wallet() {
   const [stateError, setStateError] = useState<string | null>(null);
   const [signingId, setSigningId] = useState<string | null>(null);
   const [me, setMe] = useState<{ npub: string; label: string; participant_id: number | null } | null>(null);
+  const [popover, setPopover] = useState<{
+    npub: string;
+    name: string;
+    initials: string;
+    color: string;
+    role?: string;
+  } | null>(null);
+  const [signer, setSigner] = useState<NostrSigner | null>(null);
+  const [plain, setPlain] = useState<Record<string, string>>({});
+  const [personas, setPersonas] = useState<Persona[]>([]);
   const [audit, setAudit] = useState<{ entries?: AuditEntryUI[]; restricted?: boolean }>({});
+  const [members, setMembers] = useState<
+    { npub: string; label: string; role: string; initials: string; color: string }[]
+  >([]);
   const [chainTip, setChainTip] = useState<number | null>(null);
+  const [activity, setActivity] = useState<ActivityRow[] | null>(null);
   const btcPrice = useBtcPrice();
 
   useEffect(() => {
@@ -125,6 +199,34 @@ export default function Wallet() {
     }
   }, [chats]);
 
+  // Derive the real "Recent activity" feed from the on-chain tx history of every
+  // vault receive address. Keyed on the address set (not the whole chats array)
+  // so per-address balance ticks don't trigger a refetch.
+  const vaultAddrPairs = JSON.stringify(
+    chats.filter((c) => c.receiveAddress).map((c) => [c.receiveAddress, c.name] as const),
+  );
+  useEffect(() => {
+    const pairs = JSON.parse(vaultAddrPairs) as [string, string][];
+    if (pairs.length === 0) return; // no live addresses yet → keep loading state
+    const addrToVault = new Map(pairs);
+    const addrs = pairs.map(([a]) => a).join(",");
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await fetch(`/api/chain/activity?addrs=${encodeURIComponent(addrs)}&limit=8`);
+        if (!r.ok || cancelled) return;
+        const { activity: rows } = (await r.json()) as { activity: ActivityApiEntry[] };
+        if (cancelled) return;
+        setActivity(rows.map((e) => ({ ...e, vault: addrToVault.get(e.address) ?? e.address })));
+      } catch {
+        /* esplora unreachable → leave the prior activity state in place */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [vaultAddrPairs]);
+
   const refreshAudit = useCallback(async (chatId: string) => {
     const res = await fetch(`/api/chats/${chatId}/audit`);
     if (res.status === 403) return setAudit({ restricted: true });
@@ -134,6 +236,48 @@ export default function Wallet() {
 
   const onLogout = useCallback(async () => {
     await fetch("/api/auth/logout", { method: "POST" });
+    window.location.href = "/login";
+  }, []);
+
+  // Demo signer roster for the sidebar switcher (empty if the backend is offline).
+  useEffect(() => {
+    fetch("/api/auth/personas")
+      .then((r) => r.json())
+      .then((d) => setPersonas((d.personas ?? []) as Persona[]))
+      .catch(() => setPersonas([]));
+  }, []);
+
+  // One-tap switch to another demo persona: sign a fresh challenge with that
+  // signer's deterministic secret, swap the session cookie, reload as them.
+  const onSwitchPersona = useCallback(async (participantId: number) => {
+    try {
+      const { nonce } = (await (await fetch("/api/auth/challenge")).json()) as { nonce: string };
+      const event = finalizeEvent(challengeTemplate(nonce), await personaSecret(participantId));
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ event, nonce }),
+      });
+      if (!res.ok) throw new Error(((await res.json()) as { error?: string }).error ?? "Switch failed");
+      window.location.href = "/";
+    } catch (e) {
+      setStateError(e instanceof Error ? e.message : "Switch failed");
+    }
+  }, []);
+
+  // A 401 from an authenticated route means the session cookie is stale: it's
+  // *present* (so proxy.ts admitted us into the wallet) but no longer valid in
+  // the DB — an expired or reset login. The cookie is httpOnly, so JS can't
+  // clear it directly; hit logout to clear it server-side, then send the user
+  // to re-authenticate. Beats stranding them on a wallet where every action
+  // 401s behind a misleading "backend compiling" banner.
+  const handleSessionExpired = useCallback(async () => {
+    setStateError("Your session expired — taking you to sign in…");
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      /* redirect regardless of the logout result */
+    }
     window.location.href = "/login";
   }, []);
 
@@ -197,6 +341,11 @@ export default function Wallet() {
         if (meRes.ok) {
           const m = await meRes.json().catch(() => null);
           if (m) setMe({ npub: m.npub, label: m.label, participant_id: m.participant_id });
+        } else if (meRes.status === 401) {
+          // Cookie present but session invalid (proxy.ts is presence-only). Don't
+          // render a wallet where every signed action will 401 — re-authenticate.
+          if (!cancelled) void handleSessionExpired();
+          return;
         }
 
         if (stateRes.ok) {
@@ -209,21 +358,14 @@ export default function Wallet() {
             messages: [...liveVault.messages, ...(apiTreasury?.messages ?? [])],
           };
           setChats([liveChat, ...apiChats.filter((c) => c.id !== "treasury")]);
-          const live = buildLiveApproval(ws);
-          const apiTx1 = apiApprovals.find((a) => a.id === "tx1");
-          const mergedLive: Approval = apiTx1
-            ? {
-                ...live,
-                signed: Math.max(live.signed, apiTx1.signed),
-                youSigned: apiTx1.youSigned,
-                status: apiTx1.status,
-                proof: apiTx1.proof ?? live.proof,
-              }
-            : live;
-          setApprovals([mergedLive, ...apiApprovals.filter((a) => a.id !== "tx1")]);
+          // Approvals come straight from the DB — no hardcoded fixture overlay.
+          setApprovals(apiApprovals);
         } else {
           const sj = await stateRes.json().catch(() => ({}));
-          setStateError(sj.error ?? "Failed to load live vault");
+          setStateError(
+            sj.error ??
+              "Couldn't load the live vault — the DKGKit backend may still be compiling; refresh in a moment.",
+          );
           setChats(apiChats);
           setApprovals(apiApprovals);
         }
@@ -234,7 +376,7 @@ export default function Wallet() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [handleSessionExpired]);
 
   const go = (v: View) => () => {
     setView(v);
@@ -246,6 +388,7 @@ export default function Wallet() {
     setDraft("");
   };
   const toggleVault = () => setShowVault((s) => !s);
+  const toggleMembers = () => setShowMembers((s) => !s);
 
   const active = useMemo(
     () => chats.find((c) => c.id === activeChat) ?? (view === "chat" ? chats[0] : null),
@@ -261,6 +404,66 @@ export default function Wallet() {
     void refreshAudit(active.id);
   }, [view, active, refreshAudit]);
 
+  // Load members roster when the active chat changes.
+  useEffect(() => {
+    setShowMembers(false); // close the channel-info dialog when switching chats
+    if (!active) {
+      setMembers([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const res = await fetch(`/api/chats/${active.id}/members`);
+      if (!res.ok) {
+        if (!cancelled) setMembers([]);
+        return;
+      }
+      const { members: rows } = (await res.json()) as { members: typeof members };
+      if (!cancelled) setMembers(rows);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [active?.id]);
+
+  // Resolve the NIP-44 signer whenever the logged-in user changes.
+  useEffect(() => {
+    if (!me) {
+      setSigner(null);
+      return;
+    }
+    let cancelled = false;
+    void resolveSigner({ npub: me.npub, participant_id: me.participant_id }).then((s) => {
+      if (!cancelled) setSigner(s);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [me]);
+
+  // Decrypt the active DM's message history as messages arrive.
+  useEffect(() => {
+    if (!signer || !active || active.type !== "direct" || !active.counterpartyNpub) return;
+    const cp = active.counterpartyNpub;
+    let cancelled = false;
+    void (async () => {
+      const next: Record<string, string> = {};
+      for (const m of active.messages) {
+        if (plain[m.id] !== undefined) continue;
+        try {
+          next[m.id] = await signer.decrypt(cp, m.text);
+        } catch {
+          next[m.id] = "🔒 can't decrypt";
+        }
+      }
+      if (!cancelled && Object.keys(next).length) setPlain((p) => ({ ...p, ...next }));
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signer, active?.id, active?.messages.length]);
+
   // ---- approval actions ----
   // All signing is persisted server-side. For live approvals the route runs a
   // real grouped HTSS round in Rust and stores the aggregate signature; for
@@ -269,8 +472,13 @@ export default function Wallet() {
   const onSign = useCallback(
     async (id: string) => {
       setSigningId(id);
+      setStateError(null);
       try {
         const res = await fetch(`/api/approvals/${id}/sign`, { method: "POST" });
+        if (res.status === 401) {
+          await handleSessionExpired();
+          return;
+        }
         const json = await res.json();
         if (!res.ok) throw new Error(json.error ?? "Signing failed");
         const updated = json.approval as Approval;
@@ -294,12 +502,37 @@ export default function Wallet() {
         setSigningId(null);
       }
     },
-    [active, refreshAudit],
+    [active, refreshAudit, handleSessionExpired],
   );
   const onReject = (id: string) =>
     setApprovals((prev) => prev.map((t) => (t.id === id ? { ...t, status: "rejected" } : t)));
-  const onBroadcast = (id: string) =>
-    setApprovals((prev) => prev.map((t) => (t.id === id ? { ...t, status: "broadcast" } : t)));
+  // Broadcasting is a SEPARATE action from signing: only a `ready` transfer (quorum
+  // reached + aggregate verified) can broadcast, and it settles the real tx on-chain.
+  const onBroadcast = useCallback(
+    async (id: string) => {
+      setSigningId(id);
+      setStateError(null);
+      try {
+        const res = await fetch(`/api/approvals/${id}/broadcast`, { method: "POST" });
+        if (res.status === 401) {
+          await handleSessionExpired();
+          return;
+        }
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error ?? "Broadcast failed");
+        const updated = json.approval as Approval;
+        setApprovals((prev) =>
+          prev.map((t) => (t.id === id ? { ...t, status: "broadcast", txid: updated.txid } : t)),
+        );
+        if (active) void refreshAudit(active.id);
+      } catch (e) {
+        setStateError(e instanceof Error ? e.message : "Broadcast failed");
+      } finally {
+        setSigningId(null);
+      }
+    },
+    [active, refreshAudit, handleSessionExpired],
+  );
 
   // ---- vault policy editing ----
   const setThreshold = (chatId: string, tierId: string, delta: number) => () =>
@@ -370,22 +603,57 @@ export default function Wallet() {
     const cid = activeChat;
     setDraft("");
     void (async () => {
+      let payload = text;
+      const dm = active && active.type === "direct" ? active : null;
+      if (dm) {
+        if (!signer || !dm.counterpartyNpub) {
+          setStateError("DM encryption unavailable — log in with a persona or a NIP-44 capable signer");
+          return;
+        }
+        try {
+          payload = await signer.encrypt(dm.counterpartyNpub, text);
+        } catch {
+          setStateError("Could not encrypt message");
+          return;
+        }
+      }
       const res = await fetch("/api/messages", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chatId: cid, text }),
+        body: JSON.stringify({ chatId: cid, text: payload }),
       });
       if (!res.ok) {
         setStateError(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "Message failed");
         return;
       }
       const { message } = (await res.json()) as { message: ChatMessage };
+      if (dm) setPlain((p) => ({ ...p, [message.id]: text })); // show our own plaintext immediately
       setChats((prev) =>
         prev.map((c) => (c.id === cid ? { ...c, messages: [...c.messages, message] } : c)),
       );
       void refreshAudit(cid);
     })();
   };
+  const startDm = useCallback(
+    async (targetNpub: string) => {
+      setPopover(null);
+      const res = await fetch("/api/dms", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ targetNpub }),
+      });
+      if (!res.ok) {
+        setStateError(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "Could not open DM");
+        return;
+      }
+      const { chat } = (await res.json()) as { chat: Chat };
+      setChats((prev) => (prev.some((c) => c.id === chat.id) ? prev : [...prev, chat]));
+      setActiveChat(chat.id);
+      setView("chat");
+    },
+    [],
+  );
+
   const submitSend = () => {
     const amt = parseFloat(sendForm.amount);
     if (!activeChat || !sendForm.dest.trim() || !(amt > 0)) return;
@@ -405,6 +673,8 @@ export default function Wallet() {
       title: `Transfer · ${module}`,
       dest: destShort,
       destLabel: module,
+      recipientAddress: dest,
+      amountSats: Math.round(amt * 1e8),
       btc: amt.toFixed(2),
       usd,
       vault: chat.name,
@@ -415,6 +685,9 @@ export default function Wallet() {
       signed: 0,
       youSigned: false,
       status: "pending",
+      // A transfer out of a real DKG vault signs a live grouped HTSS round and
+      // can be broadcast on-chain. Plain DMs (no receive address) stay mock.
+      live: !!chat.receiveAddress,
     };
     const announce = `Requested a transfer — ${amt} BTC to ${destShort} on ${module}. Needs a ${policy} quorum — please review and sign in Approvals.`;
     void (async () => {
@@ -448,7 +721,6 @@ export default function Wallet() {
   const balancesPending = vaultChats.some((c) => c.receiveAddress && c.balanceBtc === "");
   const totalKeys = vaultChats.reduce((s, c) => s + c.tiers.reduce((a, t) => a + t.keys.length, 0), 0);
   const vaultCount = vaultChats.length;
-  const pendingCount = approvals.filter((t) => t.status === "pending" || t.status === "ready").length;
   const youNeed = approvals.filter((t) => !t.youSigned && t.status === "pending").length;
   const sendApprovals = approvals.filter((a) => a.kind !== "role");
   const roleApprovals = approvals.filter((a) => a.kind === "role");
@@ -490,6 +762,10 @@ export default function Wallet() {
         openChat={openChat}
         goPlan={go("plan")}
         onCreateChannel={onCreateChannel}
+        me={me}
+        personas={personas}
+        onSwitchPersona={onSwitchPersona}
+        onLogout={onLogout}
       />
 
       <main style={{ flex: 1, height: "100%", display: "flex", flexDirection: "column", minWidth: 0 }}>
@@ -533,7 +809,7 @@ export default function Wallet() {
         <div style={{ flex: 1, overflowY: "auto", padding: 30 }}>
           {stateError && (
             <div style={{ marginBottom: 18, background: "rgba(240,97,109,.08)", border: "1px solid rgba(240,97,109,.3)", color: C.red, borderRadius: 12, padding: "12px 16px", fontSize: 12.5 }}>
-              Live vault error: {stateError}. The DKGKit backend may still be compiling — refresh in a moment.
+              {stateError}
             </div>
           )}
 
@@ -544,10 +820,11 @@ export default function Wallet() {
               balanceUsd={balancesPending || btcPrice == null ? "…" : Math.round(totalBtc * btcPrice).toLocaleString("en-US")}
               vaultCount={vaultCount}
               totalKeys={totalKeys}
-              pendingCount={pendingCount}
-              primary={chats[0]}
+              youNeed={youNeed}
+              activity={activity}
+              vaultChats={vaultChats}
+              openChat={openChat}
               goApprovals={go("approvals")}
-              goPrimaryVault={openChat("treasury")}
             />
           )}
 
@@ -573,10 +850,11 @@ export default function Wallet() {
               )}
               onSign={onSign}
               signingId={signingId}
-              onCreateVault={onCreateVault}
               provisioning={provisioningId === active.id}
               showVault={showVault}
               toggleVault={toggleVault}
+              showMembers={showMembers}
+              toggleMembers={toggleMembers}
               wstate={wstate}
               draft={draft}
               setDraft={setDraft}
@@ -587,12 +865,33 @@ export default function Wallet() {
               setThreshold={setThreshold}
               removeKey={removeKey}
               proposeKey={proposeKey}
+              onAuthorClick={(m) =>
+                m.authorNpub &&
+                setPopover({ npub: m.authorNpub, name: m.who, initials: m.initials, color: m.color })
+              }
+              members={members}
+              onMemberClick={(mem) =>
+                setPopover({ npub: mem.npub, name: mem.label, initials: mem.initials, color: mem.color, role: mem.role })
+              }
+              plain={plain}
             />
           )}
 
           {view === "plan" && <Plan />}
         </div>
       </main>
+      {popover && me && (
+        <ProfilePopover
+          npub={popover.npub}
+          name={popover.name}
+          initials={popover.initials}
+          color={popover.color}
+          role={popover.role}
+          isSelf={popover.npub === me.npub}
+          onStartDm={(npub) => void startDm(npub)}
+          onClose={() => setPopover(null)}
+        />
+      )}
     </div>
   );
 }
@@ -610,6 +909,10 @@ function Sidebar({
   openChat,
   goPlan,
   onCreateChannel,
+  me,
+  personas,
+  onSwitchPersona,
+  onLogout,
 }: {
   view: View;
   active: Chat | null;
@@ -619,7 +922,12 @@ function Sidebar({
   openChat: (id: string) => () => void;
   goPlan: () => void;
   onCreateChannel: () => void;
+  me: { npub: string; label: string; participant_id: number | null } | null;
+  personas: Persona[];
+  onSwitchPersona: (participantId: number) => void;
+  onLogout: () => void;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   const nav = [
     { key: "overview" as const, label: "Overview", icon: "◉", badge: "" },
     { key: "approvals" as const, label: "Approvals", icon: "✎", badge: youNeed ? String(youNeed) : "" },
@@ -693,20 +1001,71 @@ function Sidebar({
       </div>
 
       <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
-        <Link href="/console" style={{ fontSize: 11.5, color: C.faint2, textDecoration: "none", padding: "0 8px", display: "flex", alignItems: "center", gap: 7 }}>
-          <span style={{ color: C.orange }}>↗</span> DKGKit protocol console
-        </Link>
         <div style={{ background: "rgba(247,147,26,.07)", border: "1px solid rgba(247,147,26,.22)", borderRadius: 12, padding: "13px 14px" }}>
           <div style={{ fontSize: 11, color: C.sand, letterSpacing: ".3px", marginBottom: 6 }}>SELF-CUSTODY</div>
           <div style={{ fontSize: 12.5, color: "#C5C9CE", lineHeight: 1.45 }}>No keys held by BTech. Your quorum, your coins.</div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 8px 4px", borderTop: `1px solid ${C.line}` }}>
-          <div style={{ width: 30, height: 30, borderRadius: 8, background: "#23262B", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 600, color: C.muted }}>DK</div>
-          <div style={{ lineHeight: 1.15, flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>Dana Klein</div>
-            <div style={{ fontSize: 11, color: C.faint }}>Business plan</div>
+        <div style={{ position: "relative", borderTop: `1px solid ${C.line}`, paddingTop: 11 }}>
+          {menuOpen && (
+            <>
+              <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 30 }} />
+              <div style={{ position: "absolute", bottom: "calc(100% + 6px)", left: 0, right: 0, zIndex: 31, background: C.surface2, border: `1px solid ${C.line2}`, borderRadius: 12, padding: 6, boxShadow: "0 14px 36px rgba(0,0,0,.55)" }}>
+                <div style={{ fontSize: 10, color: C.faint, letterSpacing: ".4px", padding: "6px 8px 5px" }}>SWITCH SIGNER · DEMO</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 248, overflowY: "auto" }}>
+                  {personas.length === 0 && (
+                    <div style={{ fontSize: 11.5, color: C.faint, padding: "6px 8px" }}>No demo signers loaded.</div>
+                  )}
+                  {personas.map((p) => {
+                    const current = me?.npub === p.npub;
+                    return (
+                      <button
+                        key={p.npub}
+                        onClick={() => {
+                          setMenuOpen(false);
+                          if (!current) void onSwitchPersona(p.participant_id);
+                        }}
+                        style={{ display: "flex", alignItems: "center", gap: 9, width: "100%", border: "none", background: current ? C.orangeSoft : "transparent", borderRadius: 8, padding: "7px 8px", cursor: current ? "default" : "pointer", fontFamily: "inherit", textAlign: "left", color: C.ink }}
+                      >
+                        <span style={{ width: 22, height: 22, flex: "0 0 22px", borderRadius: 6, background: current ? C.orange : "#23262B", color: current ? C.bg : C.muted, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9.5, fontWeight: 700 }}>{initialsOf(p.label)}</span>
+                        <span style={{ flex: 1, minWidth: 0, lineHeight: 1.2 }}>
+                          <span style={{ display: "block", fontSize: 12.5, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.label}</span>
+                          <span style={{ display: "block", fontSize: 10.5, color: C.faint }}>{p.role} · #{p.participant_id}</span>
+                        </span>
+                        {current && <span style={{ flex: "0 0 auto", fontSize: 9, color: C.orange }}>● now</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void onLogout();
+                  }}
+                  style={{ width: "100%", marginTop: 4, border: "none", borderTop: `1px solid ${C.line2}`, background: "transparent", color: C.faint2, fontSize: 11.5, fontFamily: "inherit", padding: "9px 8px 5px", textAlign: "left", cursor: "pointer" }}
+                >
+                  Sign out
+                </button>
+              </div>
+            </>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 8px 4px" }}>
+            <button
+              onClick={() => setMenuOpen((o) => !o)}
+              disabled={!me}
+              title="Switch signer"
+              style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 10, border: "none", background: "transparent", padding: 0, cursor: me ? "pointer" : "default", fontFamily: "inherit", textAlign: "left", color: C.ink }}
+            >
+              <div style={{ width: 30, height: 30, flex: "0 0 30px", borderRadius: 8, background: "#23262B", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 600, color: C.muted }}>{me ? initialsOf(me.label) : "…"}</div>
+              <div style={{ lineHeight: 1.15, flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{me?.label ?? "Signing in…"}</div>
+                <div style={{ fontSize: 11, color: C.faint }}>
+                  {me ? (me.participant_id != null ? `Signer #${me.participant_id} · switch` : "Observer · switch") : ""}
+                </div>
+              </div>
+              <span style={{ flex: "0 0 auto", color: C.faint, fontSize: 9, transform: menuOpen ? "rotate(180deg)" : "none", transition: "transform 150ms ease" }}>▲</span>
+            </button>
+            <button onClick={goPlan} style={{ flex: "0 0 auto", background: C.orangeSoft, border: "1px solid rgba(247,147,26,.32)", color: C.orange, fontSize: 11, fontWeight: 600, fontFamily: "inherit", padding: "6px 11px", borderRadius: 8, cursor: "pointer" }}>Upgrade</button>
           </div>
-          <button onClick={goPlan} style={{ flex: "0 0 auto", background: C.orangeSoft, border: "1px solid rgba(247,147,26,.32)", color: C.orange, fontSize: 11, fontWeight: 600, fontFamily: "inherit", padding: "6px 11px", borderRadius: 8, cursor: "pointer" }}>Upgrade</button>
         </div>
       </div>
     </aside>
@@ -727,28 +1086,26 @@ function Overview({
   balanceUsd,
   vaultCount,
   totalKeys,
-  pendingCount,
-  primary,
+  youNeed,
+  activity,
+  vaultChats,
+  openChat,
   goApprovals,
-  goPrimaryVault,
 }: {
   wstate: WalletState | null;
   balanceBtc: string;
   balanceUsd: string;
   vaultCount: number;
   totalKeys: number;
-  pendingCount: number;
-  primary: Chat | undefined;
+  youNeed: number;
+  activity: ActivityRow[] | null;
+  vaultChats: Chat[];
+  openChat: (id: string) => () => void;
   goApprovals: () => void;
-  goPrimaryVault: () => void;
 }) {
-  const activity = [
-    { icon: "↓", dotBg: "rgba(63,185,80,.12)", dotColor: C.green, label: "Received from exchange", meta: "Coinbase Prime · #cold-reserve", amount: "+12.50 BTC", time: "2h ago" },
-    { icon: "✎", dotBg: "rgba(247,147,26,.12)", dotColor: C.orange, label: "CEO signed — Payroll batch", meta: "#treasury-ops · 4/4", amount: "—", time: "3h ago" },
-    { icon: "↑", dotBg: "rgba(240,97,109,.12)", dotColor: C.red, label: "Sent to vendor", meta: "#treasury-ops · whitelisted", amount: "−1.10 BTC", time: "1d ago" },
-    { icon: "#", dotBg: "rgba(255,255,255,.06)", dotColor: C.muted, label: "New chat created", meta: "#ops-petty-cash · 2-of-3 vault", amount: "—", time: "2d ago" },
-  ];
-
+  const [selId, setSelId] = useState("");
+  const sel =
+    vaultChats.find((c) => c.id === selId) ?? vaultChats.find((c) => c.live) ?? vaultChats[0];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18, maxWidth: 1160 }}>
       <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 18 }}>
@@ -769,7 +1126,7 @@ function Overview({
         <div onClick={goApprovals} style={{ background: C.surface, border: "1px solid rgba(247,147,26,.3)", borderRadius: 16, padding: "22px 24px", cursor: "pointer" }}>
           <div style={{ fontSize: 12, color: C.sand, letterSpacing: ".3px" }}>AWAITING YOUR SIGNATURE</div>
           <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginTop: 10 }}>
-            <span style={{ fontFamily: MONO, fontSize: 34, fontWeight: 600, color: C.orange }}>{pendingCount}</span>
+            <span style={{ fontFamily: MONO, fontSize: 34, fontWeight: 600, color: C.orange }}>{youNeed}</span>
             <span style={{ fontSize: 14, color: C.faint2 }}>transactions</span>
           </div>
           <div style={{ display: "inline-flex", alignItems: "center", gap: 7, marginTop: 16, background: C.orange, color: C.bg, fontSize: 12.5, fontWeight: 600, padding: "7px 12px", borderRadius: 8 }}>Review approvals →</div>
@@ -781,42 +1138,95 @@ function Overview({
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
         <div style={{ background: C.surface, border: `1px solid ${C.line2}`, borderRadius: 16, padding: "6px 4px" }}>
           <div style={{ fontSize: 13, fontWeight: 600, padding: "16px 20px 12px" }}>Recent activity</div>
-          {activity.map((a, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 13, padding: "11px 20px", borderTop: "1px solid rgba(255,255,255,.05)" }}>
-              <span style={{ width: 32, height: 32, borderRadius: 9, background: a.dotBg, color: a.dotColor, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, flex: "0 0 32px" }}>{a.icon}</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 500 }}>{a.label}</div>
-                <div style={{ fontSize: 11.5, color: C.faint2 }}>{a.meta}</div>
-              </div>
-              <div style={{ fontFamily: MONO, fontSize: 12.5, color: "#9CA1A7", textAlign: "right" }}>
-                {a.amount}
-                <div style={{ fontSize: 10.5, color: C.faint }}>{a.time}</div>
-              </div>
-            </div>
-          ))}
+          {activity == null ? (
+            <div style={{ fontSize: 12, color: C.faint, padding: "8px 20px 16px" }}>Loading on-chain activity…</div>
+          ) : activity.length === 0 ? (
+            <div style={{ fontSize: 12, color: C.faint, padding: "8px 20px 16px" }}>No on-chain activity yet.</div>
+          ) : (
+            activity.map((a) => {
+              const inbound = a.direction === "in";
+              return (
+                <div key={`${a.txid}:${a.address}`} style={{ display: "flex", alignItems: "center", gap: 13, padding: "11px 20px", borderTop: "1px solid rgba(255,255,255,.05)" }}>
+                  <span style={{ width: 32, height: 32, borderRadius: 9, background: inbound ? "rgba(63,185,80,.12)" : "rgba(240,97,109,.12)", color: inbound ? C.green : C.red, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, flex: "0 0 32px" }}>{inbound ? "↓" : "↑"}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500 }}>{inbound ? "Receive" : "Send"}</div>
+                    <div style={{ fontSize: 11.5, color: C.faint2, fontFamily: MONO }}>
+                      {a.vault} · {a.txid.slice(0, 8)}…{!a.confirmed && " · pending"}
+                    </div>
+                  </div>
+                  <div style={{ fontFamily: MONO, fontSize: 12.5, color: inbound ? C.green : C.red, textAlign: "right" }}>
+                    {inbound ? "+" : "−"}{fmtBtc(a.deltaSats)} BTC
+                    <div style={{ fontSize: 10.5, color: C.faint }}>{relTime(a.blockTime)}</div>
+                  </div>
+                  <a
+                    href={a.txUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="View transaction on block explorer"
+                    style={{ flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "center", width: 28, height: 28, borderRadius: 8, border: `1px solid ${C.line2}`, color: C.faint2, textDecoration: "none", fontSize: 13 }}
+                  >
+                    ↗
+                  </a>
+                </div>
+              );
+            })
+          )}
         </div>
         <div style={{ background: C.surface, border: `1px solid ${C.line2}`, borderRadius: 16, padding: "20px 22px", display: "flex", flexDirection: "column" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <div style={{ fontSize: 13, fontWeight: 600 }}>{primary?.name ?? "#treasury-ops"} quorum</div>
-            <button onClick={goPrimaryVault} style={{ background: "transparent", border: `1px solid ${C.line2}`, color: "#C5C9CE", fontSize: 11.5, fontFamily: "inherit", padding: "5px 11px", borderRadius: 7, cursor: "pointer" }}>Open chat &amp; vault</button>
-          </div>
-          <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 11 }}>
-            {(primary?.tiers ?? []).map((t, i) => (
-              <div key={t.id}>
-                {i > 0 && <div style={{ display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: C.faint, letterSpacing: 1, margin: "11px 0" }}>AND</div>}
-                <div style={{ display: "flex", alignItems: "center", gap: 13, background: C.surface2, border: `1px solid ${C.line}`, borderRadius: 11, padding: "13px 15px" }}>
-                  <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 600, color: C.orange, background: C.orangeSoft, padding: "4px 9px", borderRadius: 7 }}>{clampNeed(t)} / {t.keys.length}</span>
-                  <div>
-                    <div style={{ fontSize: 13, fontWeight: 500 }}>{t.name}</div>
-                    <div style={{ fontSize: 11.5, color: C.faint2 }}>{t.keys.map((k) => k.name.split(" ")[0]).join(" · ")}</div>
-                  </div>
-                </div>
+          {!sel ? (
+            <div style={{ fontSize: 12.5, color: C.faint2 }}>No vaults yet.</div>
+          ) : (
+            <>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                <select
+                  value={sel.id}
+                  onChange={(e) => setSelId(e.target.value)}
+                  style={{ background: C.surface2, border: `1px solid ${C.line2}`, color: C.ink, borderRadius: 8, padding: "6px 10px", fontSize: 13, fontWeight: 600, fontFamily: "inherit", cursor: "pointer", outline: "none", maxWidth: "60%" }}
+                  title="Switch vault"
+                >
+                  {vaultChats.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                <button onClick={openChat(sel.id)} style={{ flex: "0 0 auto", background: "transparent", border: `1px solid ${C.line2}`, color: "#C5C9CE", fontSize: 11.5, fontFamily: "inherit", padding: "5px 11px", borderRadius: 7, cursor: "pointer" }}>Open chat &amp; vault</button>
               </div>
-            ))}
-          </div>
-          <div style={{ marginTop: "auto", paddingTop: 16, fontSize: 11.5, color: C.faint2, lineHeight: 1.5 }}>
-            Every spend needs a quorum from <span style={{ color: "#C5C9CE" }}>each</span> tier. Edit the policy inside the chat.
-          </div>
+
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, marginTop: 16 }}>
+                <span style={{ fontFamily: MONO, fontSize: 24, fontWeight: 600, letterSpacing: "-.5px" }}>
+                  {sel.balanceBtc === "" ? "…" : sel.balanceBtc}
+                  <span style={{ fontSize: 13, color: C.orange, fontWeight: 600 }}> BTC</span>
+                </span>
+                {sel.tiers.length > 0 && (
+                  <span style={{ fontFamily: MONO, fontSize: 12, color: C.faint2, textAlign: "right" }}>{quorumOf(sel.tiers)}</span>
+                )}
+              </div>
+
+              <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 11 }}>
+                {sel.tiers.length === 0 ? (
+                  <div style={{ fontSize: 11.5, color: C.faint2 }}>No signing tiers configured for this vault.</div>
+                ) : (
+                  sel.tiers.map((t, i) => (
+                    <div key={t.id}>
+                      {i > 0 && <div style={{ display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: C.faint, letterSpacing: 1, margin: "11px 0" }}>AND</div>}
+                      <div style={{ display: "flex", alignItems: "center", gap: 13, background: C.surface2, border: `1px solid ${C.line}`, borderRadius: 11, padding: "13px 15px" }}>
+                        <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 600, color: C.orange, background: C.orangeSoft, padding: "4px 9px", borderRadius: 7 }}>{clampNeed(t)} / {t.keys.length}</span>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 500 }}>{t.name}</div>
+                          <div style={{ fontSize: 11.5, color: C.faint2 }}>{t.keys.map((k) => k.name.split(" ")[0]).join(" · ")}</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div style={{ marginTop: "auto", paddingTop: 16, fontSize: 11.5, color: C.faint2, lineHeight: 1.5 }}>
+                Every spend needs a quorum from <span style={{ color: "#C5C9CE" }}>each</span> tier. Edit the policy inside the chat.
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -924,10 +1334,11 @@ function ChatDetail({
   pendingApprovals,
   onSign,
   signingId,
-  onCreateVault,
   provisioning,
   showVault,
   toggleVault,
+  showMembers,
+  toggleMembers,
   draft,
   setDraft,
   onSendMsg,
@@ -937,16 +1348,21 @@ function ChatDetail({
   setThreshold,
   removeKey,
   proposeKey,
+  onAuthorClick,
+  members,
+  onMemberClick,
+  plain,
 }: {
   chat: Chat;
   audit: { entries?: AuditEntryUI[]; restricted?: boolean };
   pendingApprovals: Approval[];
   onSign: (id: string) => void;
   signingId: string | null;
-  onCreateVault: (chatId: string) => void;
   provisioning: boolean;
   showVault: boolean;
   toggleVault: () => void;
+  showMembers: boolean;
+  toggleMembers: () => void;
   wstate: WalletState | null;
   draft: string;
   setDraft: (s: string) => void;
@@ -957,6 +1373,10 @@ function ChatDetail({
   setThreshold: (chatId: string, tierId: string, delta: number) => () => void;
   removeKey: (chatId: string, tierId: string, keyId: string) => () => void;
   proposeKey: (chatId: string, tierId: string) => () => void;
+  onAuthorClick: (m: ChatMessage) => void;
+  members: { npub: string; label: string; role: string; initials: string; color: string }[];
+  onMemberClick: (m: { npub: string; label: string; role: string; initials: string; color: string }) => void;
+  plain: Record<string, string>;
 }) {
   const quorum = quorumOf(chat.tiers);
   const hasVault = !!chat.vaultStatus || chat.tiers.length > 0;
@@ -965,16 +1385,28 @@ function ChatDetail({
     <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 126px)", gap: 14 }}>
       <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 14 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 9 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
             {chat.name}
             {chat.live && <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: ".4px", color: C.green, background: "rgba(63,185,80,.12)", padding: "2px 7px", borderRadius: 20 }}>LIVE</span>}
+            {chat.receiveAddress && <AddressChip address={chat.receiveAddress} />}
           </div>
           <div style={{ fontSize: 11.5, color: C.faint2, display: "flex", alignItems: "center", gap: 7, marginTop: 2 }}>
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }} />
             {isDirect ? "Direct message" : "Channel"} · {chat.members} members
-            {hasVault ? (chat.balanceBtc === "" ? " · syncing…" : ` · ${chat.balanceBtc} BTC`) : ""}
           </div>
+          {hasVault &&
+            (chat.receiveAddress ? (
+              <VaultBalance address={chat.receiveAddress} />
+            ) : (
+              <div style={{ marginTop: 8, fontSize: 11.5, color: C.sand, display: "flex", alignItems: "center", gap: 7 }}>
+                <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.sand }} />
+                {provisioning || chat.vaultStatus === "pending" ? "Provisioning vault… running DKG" : "Address provisioning…"}
+              </div>
+            ))}
         </div>
+        <button onClick={toggleMembers} title="Channel info" style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${showMembers ? C.orange : "rgba(255,255,255,.1)"}`, color: showMembers ? C.orange : "#C5C9CE", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", whiteSpace: "nowrap", padding: "9px 14px", borderRadius: 9, cursor: "pointer" }}>
+          <span style={{ fontFamily: MONO }}>{members.length}</span> Members
+        </button>
         {hasVault && (
           <button onClick={toggleVault} style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${showVault ? C.orange : "rgba(255,255,255,.1)"}`, color: showVault ? C.orange : "#C5C9CE", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", whiteSpace: "nowrap", padding: "9px 14px", borderRadius: 9, cursor: "pointer" }}>
             <span style={{ fontFamily: MONO }}>{quorum}</span> {showVault ? "Hide vault policy" : "Vault policy"}
@@ -987,15 +1419,28 @@ function ChatDetail({
           <div style={{ flex: 1, overflowY: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
             {chat.messages.map((m) => (
               <div key={m.id} style={{ display: "flex", gap: 12 }}>
-                <span style={{ width: 34, height: 34, borderRadius: 10, background: m.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color: C.bg, flex: "0 0 34px" }}>{m.initials}</span>
+                <button
+                  type="button"
+                  onClick={() => m.authorNpub && onAuthorClick(m)}
+                  disabled={!m.authorNpub}
+                  title={m.authorNpub ? "View profile" : undefined}
+                  style={{ background: "none", border: "none", padding: 0, cursor: m.authorNpub ? "pointer" : "default" }}
+                >
+                  <span style={{ width: 34, height: 34, borderRadius: 10, background: m.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color: C.bg, flex: "0 0 34px" }}>{m.initials}</span>
+                </button>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
-                    <span style={{ fontSize: 13, fontWeight: 600 }}>{m.who}</span>
+                    <span
+                      onClick={() => m.authorNpub && onAuthorClick(m)}
+                      style={{ fontSize: 13, fontWeight: 600, cursor: m.authorNpub ? "pointer" : "default" }}
+                    >{m.who}</span>
                     <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{m.handle}</span>
                     <span style={{ fontSize: 10.5, color: C.faint }}>{m.time}</span>
                     {m.signed && <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: ".3px", color: C.green, background: "rgba(63,185,80,.12)", padding: "2px 7px", borderRadius: 20 }}>SIGNED EVENT</span>}
                   </div>
-                  <div style={{ fontSize: 13, color: "#C5C9CE", lineHeight: 1.55, marginTop: 4 }}>{m.text}</div>
+                  <div style={{ fontSize: 13, color: "#C5C9CE", lineHeight: 1.55, marginTop: 4 }}>
+                    {chat.type === "direct" ? (plain[m.id] ?? "🔒 decrypting…") : m.text}
+                  </div>
                   {m.zaps && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: C.sand, background: "rgba(247,147,26,.1)", padding: "3px 9px", borderRadius: 20, marginTop: 8, fontFamily: MONO }}>{m.zaps}</span>}
                 </div>
               </div>
@@ -1050,115 +1495,140 @@ function ChatDetail({
         )}
         {!isDirect && (
           <div style={{ flex: "0 0 296px", display: "flex", flexDirection: "column", gap: 14, minHeight: 0 }}>
-            <VaultCard chat={chat} isDirect={isDirect} provisioning={provisioning} onCreateVault={onCreateVault} />
             <OngoingProposals proposals={pendingApprovals} onSign={onSign} signingId={signingId} />
             <AuditPanel audit={audit} />
           </div>
         )}
       </div>
+
+      {showMembers && (
+        <>
+          <div onClick={toggleMembers} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 60 }} />
+          <div
+            role="dialog"
+            aria-label="Channel info"
+            style={{ position: "fixed", top: "50%", left: "50%", transform: "translate(-50%,-50%)", zIndex: 61, width: 380, maxWidth: "90vw", maxHeight: "80vh", overflowY: "auto", background: C.surface, border: `1px solid ${C.line2}`, borderRadius: 16, padding: 18, boxShadow: "0 24px 64px rgba(0,0,0,.6)" }}
+          >
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 8 }}>
+                  {chat.name}
+                  {chat.live && <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: ".4px", color: C.green, background: "rgba(63,185,80,.12)", padding: "2px 7px", borderRadius: 20 }}>LIVE</span>}
+                </div>
+                <div style={{ fontSize: 11.5, color: C.faint2, marginTop: 3 }}>
+                  {isDirect ? "Direct message" : "Channel"} · {members.length} member{members.length === 1 ? "" : "s"}
+                  {hasVault && <> · secured by a {quorum} vault</>}
+                </div>
+              </div>
+              <button onClick={toggleMembers} title="Close" aria-label="Close" style={{ flex: "0 0 auto", border: "none", background: "transparent", color: C.faint2, fontSize: 22, lineHeight: 1, cursor: "pointer", fontFamily: "inherit" }}>×</button>
+            </div>
+
+            <div style={{ fontSize: 10, color: "#5E6369", letterSpacing: ".5px", margin: "18px 0 8px" }}>MEMBERS · {members.length}</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              {members.length === 0 && <div style={{ fontSize: 11.5, color: C.faint, padding: "4px 6px" }}>No members loaded.</div>}
+              {members.map((mem) => (
+                <button
+                  key={mem.npub}
+                  type="button"
+                  onClick={() => {
+                    toggleMembers();
+                    onMemberClick(mem);
+                  }}
+                  style={{ display: "flex", alignItems: "center", gap: 10, background: "none", border: "none", padding: "7px 6px", borderRadius: 8, cursor: "pointer", textAlign: "left", color: "inherit", width: "100%" }}
+                >
+                  <span style={{ width: 26, height: 26, borderRadius: 7, background: mem.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10.5, fontWeight: 700, color: "#0E1013", flex: "0 0 26px" }}>{mem.initials}</span>
+                  <span style={{ flex: 1, minWidth: 0, lineHeight: 1.2 }}>
+                    <span style={{ display: "block", fontSize: 12.5, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{mem.label}</span>
+                    <span style={{ display: "block", fontSize: 10.5, color: C.faint }}>{mem.role}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
 // ===========================================================================
-// Vault card — per-chat address / pending / create-vault state
+// Address chip — compact receive address with copy, shown in the chat header
 // ===========================================================================
 
-function VaultCard({
-  chat,
-  isDirect,
-  provisioning,
-  onCreateVault,
-}: {
-  chat: Chat;
-  isDirect: boolean;
-  provisioning: boolean;
-  onCreateVault: (chatId: string) => void;
-}) {
-  const status: "none" | "pending" | "active" = provisioning
-    ? "pending"
-    : (chat.vaultStatus ?? (chat.tiers.length > 0 ? "active" : "none"));
+function AddressChip({ address }: { address: string }) {
+  const [copied, setCopied] = useState(false);
+  const short = `${address.slice(0, 8)}…${address.slice(-5)}`;
+  const copy = () => {
+    navigator.clipboard?.writeText(address).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      },
+      () => {},
+    );
+  };
+  return (
+    <button
+      onClick={copy}
+      title={copied ? "Copied" : `Copy ${address}`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        background: C.surface2,
+        border: `1px solid ${copied ? "rgba(63,185,80,.4)" : C.line2}`,
+        color: copied ? C.green : "#9CA1A7",
+        fontFamily: MONO,
+        fontSize: 11.5,
+        fontWeight: 500,
+        padding: "3px 9px",
+        borderRadius: 7,
+        cursor: "pointer",
+      }}
+    >
+      {copied ? "Copied" : short}
+      <span aria-hidden style={{ fontSize: 12 }}>
+        {copied ? "✓" : "⧉"}
+      </span>
+    </button>
+  );
+}
 
+// ===========================================================================
+// Vault balance — live on-chain balance for the receive address, shown in the
+// chat header right under the address (no separate "Shared vault" card).
+// ===========================================================================
+
+function VaultBalance({ address }: { address: string }) {
   const [chain, setChain] = useState<{ totalSats: number; confirmedSats: number; mempoolSats: number } | null>(null);
   const [chainErr, setChainErr] = useState(false);
   useEffect(() => {
-    if (status !== "active" || !chat.receiveAddress) return;
     let cancelled = false;
     setChain(null);
     setChainErr(false);
-    fetch(`/api/chain/address/${chat.receiveAddress}`)
+    fetch(`/api/chain/address/${address}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error("chain"))))
       .then((d) => !cancelled && setChain(d))
       .catch(() => !cancelled && setChainErr(true));
     return () => {
       cancelled = true;
     };
-  }, [status, chat.receiveAddress]);
+  }, [address]);
 
   return (
-    <aside style={{ flex: "0 0 auto", background: C.surface, border: `1px solid ${C.line2}`, borderRadius: 16, padding: 16 }}>
-      <div style={{ fontSize: 13, fontWeight: 600 }}>Shared vault</div>
-
-      {status === "none" && (
-        <>
-          <div style={{ fontSize: 11.5, color: C.faint2, marginTop: 6, lineHeight: 1.5 }}>
-            {isDirect
-              ? "This is a direct chat. Create a 2-of-2 vault to hold and spend bitcoin together."
-              : "No shared vault yet."}
-          </div>
-          {isDirect && (
-            <button
-              onClick={() => onCreateVault(chat.id)}
-              style={{ width: "100%", marginTop: 12, background: C.orange, border: "none", color: C.bg, fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", padding: "9px 12px", borderRadius: 8, cursor: "pointer" }}
-            >
-              Create 2-of-2 vault
-            </button>
-          )}
-        </>
-      )}
-
-      {status === "pending" && (
-        <div style={{ fontSize: 11.5, color: C.sand, marginTop: 8, display: "flex", alignItems: "center", gap: 7 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.sand }} />
-          Provisioning vault… running DKG
-        </div>
-      )}
-
-      {status === "active" && (
-        <>
-          <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px", marginTop: 10 }}>Receive address</div>
-          {chat.receiveAddress ? (
-            <div style={{ fontFamily: MONO, fontSize: 11.5, color: "#C5C9CE", marginTop: 4, wordBreak: "break-all" }}>
-              {chat.receiveAddress}
-            </div>
-          ) : (
-            <div style={{ fontSize: 11.5, color: C.sand, marginTop: 4 }}>Address provisioning…</div>
-          )}
-          {chat.receiveAddress && (
-            <>
-              <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px", marginTop: 12 }}>
-                On-chain balance · regtest
-              </div>
-              <div style={{ fontFamily: MONO, fontSize: 13, color: chain && chain.totalSats > 0 ? C.green : "#C5C9CE", marginTop: 3 }}>
-                {chain
-                  ? `${(chain.totalSats / 1e8).toFixed(8)} BTC`
-                  : chainErr
-                    ? "—"
-                    : "checking…"}
-                {chain && chain.mempoolSats > 0 && (
-                  <span style={{ color: C.sand }}> ({(chain.mempoolSats / 1e8).toFixed(8)} pending)</span>
-                )}
-              </div>
-            </>
-          )}
-          {chat.tiers.length > 0 && (
-            <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint2, marginTop: 10 }}>
-              {quorumOf(chat.tiers)} quorum
-            </div>
-          )}
-        </>
-      )}
-    </aside>
+    <div style={{ marginTop: 8 }}>
+      <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px" }}>On-chain balance · regtest</div>
+      <div style={{ fontFamily: MONO, fontSize: 20, fontWeight: 600, color: chain && chain.totalSats > 0 ? C.green : "#C5C9CE", marginTop: 2 }}>
+        {chain
+          ? `${(chain.totalSats / 1e8).toFixed(8)} BTC`
+          : chainErr
+            ? "—"
+            : "checking…"}
+        {chain && chain.mempoolSats > 0 && (
+          <span style={{ color: C.sand, fontSize: 12, fontWeight: 400 }}> ({(chain.mempoolSats / 1e8).toFixed(8)} pending)</span>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1250,17 +1720,19 @@ function AuditPanel({ audit }: { audit: { entries?: AuditEntryUI[]; restricted?:
   return (
     <aside
       style={{
-        flex: "0 0 296px",
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
         background: C.surface,
         border: `1px solid ${C.line2}`,
         borderRadius: 16,
         padding: 16,
-        overflowY: "auto",
-        minHeight: 0,
+        overflow: "hidden",
       }}
     >
-      <div style={{ fontSize: 13, fontWeight: 600 }}>Audit log</div>
-      <div style={{ fontSize: 10.5, color: C.faint, marginTop: 2, marginBottom: 14 }}>
+      <div style={{ flex: "0 0 auto", fontSize: 13, fontWeight: 600 }}>Audit log</div>
+      <div style={{ flex: "0 0 auto", fontSize: 10.5, color: C.faint, marginTop: 2, marginBottom: 14 }}>
         Visible to vault members only
       </div>
 
@@ -1271,7 +1743,7 @@ function AuditPanel({ audit }: { audit: { entries?: AuditEntryUI[]; restricted?:
       ) : !audit.entries || audit.entries.length === 0 ? (
         <div style={{ fontSize: 11.5, color: C.faint2 }}>No activity recorded yet.</div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12 }}>
           {audit.entries.map((e) => (
             <div key={e.id} style={{ display: "flex", gap: 9, fontSize: 11.5 }}>
               <span
@@ -1424,9 +1896,9 @@ function Stepper({ onClick, title, children }: { onClick: () => void; title: str
 
 function Plan() {
   const plans = [
-    { name: "Starter", nameColor: C.ink, price: "$0", per: "/mo", tagline: "One chat and vault for small teams getting off the exchange.", bg: C.surface, border: C.line2, featured: false, features: ["1 chat · up to 3 keys", "2-of-3 single-tier quorum", "Nostr team chat", "Email support"], cta: "Downgrade", btnBg: "transparent", btnColor: "#C5C9CE", btnBorder: "1px solid rgba(255,255,255,.14)" },
-    { name: "Business", nameColor: C.orange, price: "$499", per: "/mo", tagline: "Unlimited chats with hierarchical vaults for operating treasuries.", bg: "#15120C", border: "rgba(247,147,26,.4)", featured: true, features: ["Unlimited chats · up to 15 keys each", "Multi-tier hierarchical signatures", "Nostr team chat & proposals", "Audit log & SSO", "Priority signing support"], cta: "Current plan", btnBg: C.orange, btnColor: C.bg, btnBorder: "none" },
-    { name: "Enterprise", nameColor: C.ink, price: "Custom", per: "", tagline: "Dedicated infrastructure, SLAs and white-glove key ceremonies.", bg: C.surface, border: C.line2, featured: false, features: ["Unlimited keys & tiers", "On-site key ceremony", "Dedicated infra + 24/7 SLA", "Self-hosted Nostr relays", "Named solutions engineer"], cta: "Contact sales", btnBg: "transparent", btnColor: "#C5C9CE", btnBorder: "1px solid rgba(255,255,255,.14)" },
+    { name: "Open Source", nameColor: C.ink, price: "Free", per: "· self-hosted", tagline: "The full stack, open source. Every feature unlocked — you run it on your own infra.", bg: C.surface, border: C.line2, featured: false, features: ["Unlimited chats, vaults & keys", "All hierarchical quorum tiers", "Self-host Nostr relays & vaultd", "Full on-chain audit log", "Community support"], cta: "View source", btnBg: "transparent", btnColor: "#C5C9CE", btnBorder: "1px solid rgba(255,255,255,.14)" },
+    { name: "Business", nameColor: C.orange, price: "$499", per: "/mo", tagline: "Fully managed hosting — we run the relays and signing infra so your team doesn't have to.", bg: "#15120C", border: "rgba(247,147,26,.4)", featured: true, features: ["Up to 10 team chats", "Up to 3 signing groups per vault", "Managed Nostr relays & vaultd", "Audit log & SSO", "Priority signing support"], cta: "Current plan", btnBg: C.orange, btnColor: C.bg, btnBorder: "none" },
+    { name: "Enterprise", nameColor: C.ink, price: "Contact us", per: "", tagline: "Deal-based pricing for large treasuries. Scoped to your security and scale.", bg: C.surface, border: C.line2, featured: false, features: ["Unlimited chats & groups", "Dedicated infra + 24/7 SLA", "On-site key ceremony", "Self-hosted or managed", "Named solutions engineer"], cta: "Contact sales", btnBg: "transparent", btnColor: "#C5C9CE", btnBorder: "1px solid rgba(255,255,255,.14)" },
   ];
   return (
     <div style={{ maxWidth: 1080 }}>
@@ -1436,7 +1908,7 @@ function Plan() {
             {pl.featured && <span style={{ position: "absolute", top: 18, right: 20, fontSize: 10.5, fontWeight: 600, color: C.bg, background: C.orange, padding: "3px 10px", borderRadius: 20 }}>CURRENT</span>}
             <div style={{ fontSize: 14, fontWeight: 600, color: pl.nameColor }}>{pl.name}</div>
             <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 14 }}>
-              <span style={{ fontFamily: MONO, fontSize: 32, fontWeight: 600 }}>{pl.price}</span>
+              <span style={{ fontFamily: MONO, fontSize: pl.price.startsWith("$") ? 32 : 22, fontWeight: 600, whiteSpace: "nowrap" }}>{pl.price}</span>
               <span style={{ fontSize: 13, color: C.faint2 }}>{pl.per}</span>
             </div>
             <div style={{ fontSize: 12.5, color: C.muted, marginTop: 6, lineHeight: 1.5 }}>{pl.tagline}</div>

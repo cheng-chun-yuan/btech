@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use dkgkit_sdk::bitcoin::{
+    finalize_taproot_keyspend, taproot_keyspend_sighashes, TaprootSpendInput, TaprootSpendOutput,
+};
+
 use crate::domain::approval::ApprovalRequest;
 use crate::domain::policy::{
     demo_invalid_signer_set, demo_valid_signer_set, grouped_config_123_of_235,
@@ -28,20 +32,75 @@ pub struct DemoReport {
     pub remaining_relay_events: usize,
 }
 
+/// One vault UTXO to spend, as supplied over the settlement boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettlementInput {
+    pub txid: String,
+    pub vout: u32,
+    #[serde(rename = "valueSats")]
+    pub value_sats: u64,
+}
+
+/// A request to settle a real Taproot spend out of the vault's receive address.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettlementRequest {
+    pub recipient: String,
+    #[serde(rename = "amountSats")]
+    pub amount_sats: u64,
+    #[serde(rename = "feeSats")]
+    pub fee_sats: u64,
+    pub inputs: Vec<SettlementInput>,
+}
+
+/// The broadcastable result of a vault settlement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettlementReport {
+    pub txid: String,
+    pub raw_tx_hex: String,
+    pub vault_address: String,
+    pub recipient: String,
+    pub amount_sats: u64,
+    pub change_sats: u64,
+    pub fee_sats: u64,
+    pub signers: Vec<u16>,
+}
+
 impl WalletApp {
-    pub fn demo() -> anyhow::Result<Self> {
-        let vault = VaultService::new(
+    fn demo_vault() -> anyhow::Result<VaultService> {
+        Ok(VaultService::new(
             "btech-treasury-demo",
             "btech-treasury-demo-dkg",
             "regtest",
             [42u8; 32],
             grouped_config_123_of_235()?,
-        )?;
+        )?)
+    }
+
+    pub fn demo() -> anyhow::Result<Self> {
         Ok(Self {
-            vault,
+            vault: Self::demo_vault()?,
             repository: InMemoryRepository::default(),
             ready: false,
         })
+    }
+
+    /// Rebuild a finalized vault from persisted key material, skipping DKG. The
+    /// transport is connected so signing rounds run, but the group key and shares
+    /// are the loaded ones, so receive addresses match the saved vault.
+    pub fn load(material: crate::domain::vault::VaultKeyMaterial) -> anyhow::Result<Self> {
+        let mut vault = Self::demo_vault()?;
+        vault.connect_transport()?;
+        vault.import_key_material(material);
+        Ok(Self {
+            vault,
+            repository: InMemoryRepository::default(),
+            ready: true,
+        })
+    }
+
+    /// Finalized key material for persistence, or `None` before DKG completes.
+    pub fn export_vault(&self) -> Option<crate::domain::vault::VaultKeyMaterial> {
+        self.vault.export_key_material()
     }
 
     /// Connect transport and run DKG once. Idempotent: a long-lived service runs
@@ -155,6 +214,86 @@ impl WalletApp {
         }))
     }
 
+    /// Settle a real on-chain Taproot spend out of the vault: build the key-path
+    /// transaction, run a grouped HTSS round per input signing the BIP341 sighash
+    /// under the receive address' tweaked output key, and return the signed raw
+    /// transaction (the caller broadcasts it). Change returns to the vault.
+    pub fn settle_taproot_spend(
+        &mut self,
+        request: SettlementRequest,
+    ) -> anyhow::Result<SettlementReport> {
+        self.init()?;
+        anyhow::ensure!(
+            !request.inputs.is_empty(),
+            "settlement needs at least one input UTXO"
+        );
+
+        let vault_address = self.vault.derive_receive_address(0, 0, 0)?.address;
+        let tweak = self.vault.receive_key_tweak(0, 0, 0)?;
+        let network = self.vault.network.clone();
+
+        let total_in: u64 = request.inputs.iter().map(|input| input.value_sats).sum();
+        let spend = request
+            .amount_sats
+            .checked_add(request.fee_sats)
+            .ok_or_else(|| anyhow::anyhow!("amount + fee overflow"))?;
+        anyhow::ensure!(
+            total_in >= spend,
+            "inputs ({total_in} sats) do not cover amount + fee ({spend} sats)"
+        );
+        let change_sats = total_in - spend;
+
+        let inputs: Vec<TaprootSpendInput> = request
+            .inputs
+            .iter()
+            .map(|input| TaprootSpendInput {
+                txid: input.txid.clone(),
+                vout: input.vout,
+                value_sats: input.value_sats,
+            })
+            .collect();
+        let mut outputs = vec![TaprootSpendOutput {
+            address: request.recipient.clone(),
+            value_sats: request.amount_sats,
+        }];
+        if change_sats > 0 {
+            outputs.push(TaprootSpendOutput {
+                address: vault_address.clone(),
+                value_sats: change_sats,
+            });
+        }
+
+        let (unsigned_tx_hex, sighashes) =
+            taproot_keyspend_sighashes(&network, &vault_address, &inputs, &outputs)?;
+
+        let signer_set = demo_valid_signer_set()?;
+        let signers: Vec<u16> = signer_set.iter().map(|participant| participant.0).collect();
+        let mut signatures = Vec::with_capacity(sighashes.len());
+        for (index, sighash) in sighashes.iter().enumerate() {
+            let signature = self.vault.sign_taproot_keyspend_sighash(
+                format!("taproot-spend-input-{index}"),
+                *sighash,
+                tweak.output_xonly,
+                tweak.tweak,
+                tweak.negate_key,
+                signer_set.clone(),
+            )?;
+            signatures.push(signature);
+        }
+
+        let (raw_tx_hex, txid) = finalize_taproot_keyspend(&unsigned_tx_hex, &signatures)?;
+        Ok(SettlementReport {
+            txid,
+            raw_tx_hex,
+            vault_address,
+            recipient: request.recipient,
+            amount_sats: request.amount_sats,
+            change_sats,
+            fee_sats: request.fee_sats,
+            signers,
+        })
+    }
+
     pub fn repository(&self) -> &InMemoryRepository {
         &self.repository
     }
@@ -181,6 +320,34 @@ mod tests {
         assert_eq!(report.aggregate_signature.len(), 128);
         assert_eq!(report.remaining_relay_events, 0);
         assert_eq!(app.repository().approval_count(), 1);
+    }
+
+    #[test]
+    fn settle_taproot_spend_builds_a_verified_keypath_transaction() {
+        let mut app = WalletApp::demo().unwrap();
+        app.init().unwrap();
+        let vault_address = app.vault.derive_receive_address(0, 0, 0).unwrap().address;
+
+        let request = SettlementRequest {
+            recipient: vault_address.clone(),
+            amount_sats: 100_000_000,
+            fee_sats: 10_000,
+            inputs: vec![SettlementInput {
+                txid: "ab".repeat(32),
+                vout: 0,
+                value_sats: 50_000_000_000,
+            }],
+        };
+        // settle_taproot_spend signs each input's BIP341 sighash under the receive
+        // address' tweaked output key; aggregation verifies the signature before
+        // returning, so a successful call already proves the witness is valid.
+        let report = app.settle_taproot_spend(request).unwrap();
+
+        assert_eq!(report.change_sats, 50_000_000_000 - 100_000_000 - 10_000);
+        assert_eq!(report.signers.len(), 6);
+        assert!(report.txid.len() == 64);
+        assert!(!report.raw_tx_hex.is_empty());
+        assert_eq!(report.vault_address, vault_address);
     }
 
     #[test]

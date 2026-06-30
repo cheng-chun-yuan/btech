@@ -23,20 +23,56 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
 
   const approval = JSON.parse(row.data_json) as Approval;
   const auditChatId = resolveChatId(db, approval.vault);
+  const live = !!(row.is_live || approval.live);
 
-  let aggregate: string | null = null;
-  let proof: SigningProof | undefined;
-  if (row.is_live || approval.live) {
-    // Live vault: run a real grouped HTSS round in Rust, signing the approval's
-    // actual recipient + amount so the signature is bound to this transaction.
+  // Only registered vault signers (key-share holders) may contribute to a
+  // quorum. Membership is global in this demo — the roster lives under a single
+  // vault_id — so one lookup answers "is this user a signer?". Observers and
+  // other non-signers are rejected and never move the bar.
+  const signer = db
+    .prepare("SELECT participant_id FROM signers WHERE npub = ? LIMIT 1")
+    .get(user.npub) as { participant_id: number } | undefined;
+  if (!signer) {
+    recordAudit(db, {
+      chatId: auditChatId,
+      actorNpub: user.npub,
+      actorLabel: user.label,
+      action: "sign",
+      outcome: "failed",
+      detail: `${approval.title}: not a signer of this vault`,
+    });
+    return NextResponse.json({ error: "You are not a signer of this vault." }, { status: 403 });
+  }
+
+  // Record THIS signer's approval — one vote per npub (the table's primary key
+  // dedups, so signing twice is a no-op). The aggregate is filled in later, and
+  // only once, when the quorum is reached and the grouped round actually runs.
+  db.prepare(`
+    INSERT OR IGNORE INTO approval_signatures (approval_id, npub, aggregate_signature, signed_at)
+    VALUES (?, ?, NULL, ?)
+  `).run(id, user.npub, Date.now());
+
+  // Quorum is counted by DISTINCT SIGNERS who have approved — not by the size of
+  // the crypto round — so the bar fills one signer at a time, across users.
+  const signed = (
+    db.prepare("SELECT COUNT(*) c FROM approval_signatures WHERE approval_id = ?").get(id) as { c: number }
+  ).c;
+  const quorumReached = signed >= approval.threshold;
+
+  // Run the real grouped HTSS round ONCE — when the last required signer pushes
+  // the approval over its threshold (and the aggregate hasn't already been
+  // produced). Earlier signers cast governance votes; the vault only produces
+  // its threshold signature after enough distinct signers have approved.
+  let proof: SigningProof | undefined = approval.proof;
+  if (live && quorumReached && !approval.proof?.verified) {
     const recipient = approval.recipientAddress ?? approval.dest ?? "";
-    const amountSats =
-      approval.amountSats ?? Math.round(parseFloat(approval.btc ?? "0") * 1e8);
+    const amountSats = approval.amountSats ?? Math.round(parseFloat(approval.btc ?? "0") * 1e8);
     try {
       const report = await runSignApproval(
         { recipient, amountSats, nonce: approval.id, memo: approval.title },
         auditChatId, // sign with this vault's own key
       );
+      if (!report.verified) throw new Error("aggregate signature failed verification");
       proof = {
         digest: report.authorization_digest,
         signature: report.aggregate_signature,
@@ -44,8 +80,10 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
         signers: report.signers,
         verified: report.verified,
       };
-      if (!report.verified) throw new Error("aggregate signature failed verification");
-      aggregate = report.aggregate_signature;
+      // Stamp the completed aggregate onto the signature row that closed quorum.
+      db.prepare(
+        "UPDATE approval_signatures SET aggregate_signature = ? WHERE approval_id = ? AND npub = ?",
+      ).run(report.aggregate_signature, id, user.npub);
     } catch (err) {
       // Record the failed signing attempt in the audit trail, then surface it.
       recordAudit(db, {
@@ -63,20 +101,15 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     }
   }
 
-  db.prepare(`
-    INSERT OR IGNORE INTO approval_signatures (approval_id, npub, aggregate_signature, signed_at)
-    VALUES (?, ?, ?, ?)
-  `).run(id, user.npub, aggregate, Date.now());
-
-  const count = (
-    db.prepare("SELECT COUNT(*) c FROM approval_signatures WHERE approval_id = ?").get(id) as { c: number }
-  ).c;
+  // Ready only when the quorum is met AND — for live vaults — the aggregate has
+  // verified. A pending approval stays pending until the last signer signs.
+  const ready = quorumReached && (!live || !!proof?.verified);
   const updated: Approval = {
     ...approval,
-    signed: Math.max(approval.signed ?? 0, count),
+    signed,
     youSigned: true,
     proof: proof ?? approval.proof,
-    status: count >= approval.threshold ? "ready" : approval.status,
+    status: ready ? "ready" : approval.status,
   };
   db.prepare("UPDATE approvals SET data_json = ?, status = ? WHERE id = ?")
     .run(JSON.stringify(updated), updated.status, id);
@@ -87,7 +120,11 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     actorLabel: user.label,
     action: "sign",
     outcome: "success",
-    detail: aggregate ? "live HTSS aggregate signature verified" : approval.title,
+    detail: ready
+      ? live
+        ? `quorum reached ${signed}/${approval.threshold} — live HTSS aggregate verified`
+        : `quorum reached ${signed}/${approval.threshold}`
+      : `signed ${signed}/${approval.threshold} (signer #${signer.participant_id})`,
   });
 
   return NextResponse.json({ approval: updated });

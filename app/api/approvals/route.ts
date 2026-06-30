@@ -10,35 +10,8 @@ import type { Approval } from "../../ui/wallet/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** Ensure the live treasury approval row exists so its signatures can persist. */
-function ensureLiveApproval(db: ReturnType<typeof getDb>) {
-  db.prepare(`
-    INSERT OR IGNORE INTO approvals (id, vault, kind, data_json, status, is_live, created_at)
-    VALUES ('tx1', '#treasury-ops', 'send', ?, 'pending', 1, ?)
-  `).run(
-    JSON.stringify({
-      id: "tx1",
-      kind: "send",
-      vault: "#treasury-ops",
-      title: "Vendor payment — Blockstream",
-      live: true,
-      recipientAddress: "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
-      amountSats: 240000000,
-      threshold: 6,
-      total: 10,
-      signed: 1,
-      youSigned: false,
-      status: "pending",
-      policy: "1/2 + 2/3 + 3/5",
-      time: "12m ago",
-    }),
-    Date.now(),
-  );
-}
-
 export async function GET() {
   const db = getDb();
-  ensureLiveApproval(db);
   const user = getSessionUser(db, (await cookies()).get(SESSION_COOKIE)?.value);
   const rows = db.prepare("SELECT id, data_json FROM approvals ORDER BY created_at DESC").all() as
     { id: string; data_json: string }[];
@@ -81,8 +54,16 @@ export async function POST(request: Request) {
 
   db.prepare(`
     INSERT INTO approvals (id, vault, kind, data_json, status, is_live, created_at)
-    VALUES (?, ?, ?, ?, ?, 0, ?)
-  `).run(approval.id, approval.vault, approval.kind, JSON.stringify(approval), approval.status, Date.now());
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    approval.id,
+    approval.vault,
+    approval.kind,
+    JSON.stringify(approval),
+    approval.status,
+    approval.live ? 1 : 0,
+    Date.now(),
+  );
 
   recordAudit(db, {
     chatId: resolveChatId(db, approval.vault),
