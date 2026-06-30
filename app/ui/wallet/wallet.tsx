@@ -363,6 +363,10 @@ export default function Wallet() {
           const liveVault = buildLiveVault(ws);
           const liveChat: Chat = {
             ...liveVault,
+            // buildLiveVault has no member roster, so carry over the API's member
+            // npubs — without them treasury contributes nothing to the relay
+            // subscription's known-author gate and its messages get dropped.
+            memberNpubs: apiTreasury?.memberNpubs ?? liveVault.memberNpubs,
             messages: [...liveVault.messages, ...(apiTreasury?.messages ?? [])],
           };
           setChats([liveChat, ...apiChats.filter((c) => c.id !== "treasury")]);

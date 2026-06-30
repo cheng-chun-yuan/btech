@@ -113,11 +113,17 @@ export class NostrChatClient {
     const sub = this.pool.subscribeMany(this.relays, filter, {
       onevent: (ev) => {
         if (this.seen.has(ev.id)) return;
-        this.seen.add(ev.id);
         if (!isAddressedToMe(ev, this.meHex)) return;
         const parsed = parseChatEvent(ev);
         if (!parsed) return;
-        if (!knownAuthors.has(parsed.authorNpub)) return; // only accept known chat members
+        // Author not yet known (the member roster is still loading — e.g. a freshly
+        // opened DM, or the treasury chat) → DON'T mark it seen. The persistent
+        // client survives chat switches, so marking a rejected event seen would
+        // suppress the relay backfill on the NEXT resubscribe (which fires once the
+        // roster widens), losing the message forever. Leaving it un-seen lets that
+        // resubscribe reconsider and accept it.
+        if (!knownAuthors.has(parsed.authorNpub)) return;
+        this.seen.add(ev.id); // dedup only events we actually accept + deliver
         void this.signer
           .decrypt(parsed.authorNpub, ev.content)
           .then((text) =>

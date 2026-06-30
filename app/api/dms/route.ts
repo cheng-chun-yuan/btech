@@ -34,7 +34,11 @@ export async function POST(request: Request) {
     )
     .all(id) as Record<string, unknown>[];
   const messages = msgs.map((m) => ({ ...m, signed: !!m.signed })) as unknown as ChatMessage[];
-  const chat: Chat = { ...meta, counterpartyNpub: targetNpub, messages };
+  // Attach member npubs (same as GET /api/chats) so the client's relay subscription
+  // can author-gate the counterparty's replies immediately, instead of dropping them
+  // until the next full chat-list reload populates memberNpubs.
+  const memberNpubs = (db.prepare("SELECT npub FROM chat_members WHERE chat_id = ?").all(id) as { npub: string }[]).map((r) => r.npub);
+  const chat: Chat = { ...meta, counterpartyNpub: targetNpub, memberNpubs, messages };
 
   return NextResponse.json({ chat });
 }
