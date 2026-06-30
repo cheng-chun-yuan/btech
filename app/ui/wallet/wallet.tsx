@@ -9,6 +9,7 @@ import { ApprovalCard } from "./approval-card";
 import { buildLiveVault } from "./data";
 import { useBtcPrice } from "./use-btc-price";
 import { ProfilePopover } from "./profile-popover";
+import { resolveSigner, type NostrSigner } from "./nostr-signer";
 import type {
   Approval,
   Chat,
@@ -150,6 +151,8 @@ export default function Wallet() {
     color: string;
     role?: string;
   } | null>(null);
+  const [signer, setSigner] = useState<NostrSigner | null>(null);
+  const [plain, setPlain] = useState<Record<string, string>>({});
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [audit, setAudit] = useState<{ entries?: AuditEntryUI[]; restricted?: boolean }>({});
   const [members, setMembers] = useState<
@@ -420,6 +423,44 @@ export default function Wallet() {
     };
   }, [active?.id]);
 
+  // Resolve the NIP-44 signer whenever the logged-in user changes.
+  useEffect(() => {
+    if (!me) {
+      setSigner(null);
+      return;
+    }
+    let cancelled = false;
+    void resolveSigner({ npub: me.npub, participant_id: me.participant_id }).then((s) => {
+      if (!cancelled) setSigner(s);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [me]);
+
+  // Decrypt the active DM's message history as messages arrive.
+  useEffect(() => {
+    if (!signer || !active || active.type !== "direct" || !active.counterpartyNpub) return;
+    const cp = active.counterpartyNpub;
+    let cancelled = false;
+    void (async () => {
+      const next: Record<string, string> = {};
+      for (const m of active.messages) {
+        if (plain[m.id] !== undefined) continue;
+        try {
+          next[m.id] = await signer.decrypt(cp, m.text);
+        } catch {
+          next[m.id] = "🔒 can't decrypt";
+        }
+      }
+      if (!cancelled && Object.keys(next).length) setPlain((p) => ({ ...p, ...next }));
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signer, active?.id, active?.messages.length]);
+
   // ---- approval actions ----
   // All signing is persisted server-side. For live approvals the route runs a
   // real grouped HTSS round in Rust and stores the aggregate signature; for
@@ -559,16 +600,26 @@ export default function Wallet() {
     const cid = activeChat;
     setDraft("");
     void (async () => {
+      let payload = text;
+      const dm = active && active.type === "direct" ? active : null;
+      if (dm) {
+        if (!signer || !dm.counterpartyNpub) {
+          setStateError("DM encryption unavailable — log in with a persona or a NIP-44 capable signer");
+          return;
+        }
+        payload = await signer.encrypt(dm.counterpartyNpub, text);
+      }
       const res = await fetch("/api/messages", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chatId: cid, text }),
+        body: JSON.stringify({ chatId: cid, text: payload }),
       });
       if (!res.ok) {
         setStateError(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "Message failed");
         return;
       }
       const { message } = (await res.json()) as { message: ChatMessage };
+      if (dm) setPlain((p) => ({ ...p, [message.id]: text })); // show our own plaintext immediately
       setChats((prev) =>
         prev.map((c) => (c.id === cid ? { ...c, messages: [...c.messages, message] } : c)),
       );
@@ -812,6 +863,7 @@ export default function Wallet() {
               onMemberClick={(mem) =>
                 setPopover({ npub: mem.npub, name: mem.label, initials: mem.initials, color: mem.color, role: mem.role })
               }
+              plain={plain}
             />
           )}
 
@@ -1287,6 +1339,7 @@ function ChatDetail({
   onAuthorClick,
   members,
   onMemberClick,
+  plain,
 }: {
   chat: Chat;
   audit: { entries?: AuditEntryUI[]; restricted?: boolean };
@@ -1309,6 +1362,7 @@ function ChatDetail({
   onAuthorClick: (m: ChatMessage) => void;
   members: { npub: string; label: string; role: string; initials: string; color: string }[];
   onMemberClick: (m: { npub: string; label: string; role: string; initials: string; color: string }) => void;
+  plain: Record<string, string>;
 }) {
   const quorum = quorumOf(chat.tiers);
   const hasVault = !!chat.vaultStatus || chat.tiers.length > 0;
@@ -1367,7 +1421,9 @@ function ChatDetail({
                     <span style={{ fontSize: 10.5, color: C.faint }}>{m.time}</span>
                     {m.signed && <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: ".3px", color: C.green, background: "rgba(63,185,80,.12)", padding: "2px 7px", borderRadius: 20 }}>SIGNED EVENT</span>}
                   </div>
-                  <div style={{ fontSize: 13, color: "#C5C9CE", lineHeight: 1.55, marginTop: 4 }}>{m.text}</div>
+                  <div style={{ fontSize: 13, color: "#C5C9CE", lineHeight: 1.55, marginTop: 4 }}>
+                    {chat.type === "direct" ? (plain[m.id] ?? "🔒 decrypting…") : m.text}
+                  </div>
                   {m.zaps && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: C.sand, background: "rgba(247,147,26,.1)", padding: "3px 9px", borderRadius: 20, marginTop: 8, fontFamily: MONO }}>{m.zaps}</span>}
                 </div>
               </div>
