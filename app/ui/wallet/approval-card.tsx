@@ -115,6 +115,19 @@ export function ApprovalCard({
         </div>
       </div>
 
+      {appr.signerSet && (
+        <div style={{ marginTop: 8, fontSize: 11 }}>
+          <div style={{ color: "#8a8f98", marginBottom: 4 }}>
+            Chosen signers — {appr.signed}/{appr.signerSet.length} signed
+          </div>
+          {appr.signerSet.map((s) => (
+            <span key={s.npub} style={{ display: "inline-block", marginRight: 8, opacity: 0.9 }}>
+              {s.label} · #{s.participantId}
+            </span>
+          ))}
+        </div>
+      )}
+
       {appr.proof && (
         <div style={{ marginTop: 16, background: "#0E1014", border: "1px solid rgba(63,185,80,.25)", borderRadius: 12, padding: "13px 15px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>

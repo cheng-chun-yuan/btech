@@ -48,4 +48,19 @@ describe("POST /api/approvals", () => {
     });
     expect((await POST(req)).status).toBe(400);
   });
+
+  it("ignores a raw body.signerSet and falls back to the server-derived default", async () => {
+    install();
+    // Inject a forged signerSet with a single fake participant
+    const injected = [{ participantId: 99, npub: "npub-injected", label: "Evil", role: "signer" }];
+    const req = new Request("http://x/api/approvals", {
+      method: "POST",
+      body: JSON.stringify({ title: "Injected", vault: "#treasury-ops", signerSet: injected }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const { approval } = (await res.json()) as { approval: { signerSet: { participantId: number }[] } };
+    // The server must have ignored the injected signerSet and used the canonical default
+    expect(approval.signerSet.map((s) => s.participantId)).toEqual([1, 3, 4, 6, 7, 8]);
+  });
 });
