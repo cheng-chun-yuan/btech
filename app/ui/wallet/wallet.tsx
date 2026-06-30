@@ -133,6 +133,7 @@ export default function Wallet() {
   const [view, setView] = useState<View>("overview");
   const [activeChat, setActiveChat] = useState<string | null>(null);
   const [showVault, setShowVault] = useState(false);
+  const [showMembers, setShowMembers] = useState(false);
   const [tab, setTab] = useState<Tab>("send");
   const [draft, setDraft] = useState("");
   const [sendForm, setSendForm] = useState({ open: false, module: "Bitcoin regtest", dest: "", amount: "" });
@@ -387,6 +388,7 @@ export default function Wallet() {
     setDraft("");
   };
   const toggleVault = () => setShowVault((s) => !s);
+  const toggleMembers = () => setShowMembers((s) => !s);
 
   const active = useMemo(
     () => chats.find((c) => c.id === activeChat) ?? (view === "chat" ? chats[0] : null),
@@ -404,6 +406,7 @@ export default function Wallet() {
 
   // Load members roster when the active chat changes.
   useEffect(() => {
+    setShowMembers(false); // close the channel-info dialog when switching chats
     if (!active) {
       setMembers([]);
       return;
@@ -607,7 +610,12 @@ export default function Wallet() {
           setStateError("DM encryption unavailable — log in with a persona or a NIP-44 capable signer");
           return;
         }
-        payload = await signer.encrypt(dm.counterpartyNpub, text);
+        try {
+          payload = await signer.encrypt(dm.counterpartyNpub, text);
+        } catch {
+          setStateError("Could not encrypt message");
+          return;
+        }
       }
       const res = await fetch("/api/messages", {
         method: "POST",
@@ -845,6 +853,8 @@ export default function Wallet() {
               provisioning={provisioningId === active.id}
               showVault={showVault}
               toggleVault={toggleVault}
+              showMembers={showMembers}
+              toggleMembers={toggleMembers}
               wstate={wstate}
               draft={draft}
               setDraft={setDraft}
@@ -1327,6 +1337,8 @@ function ChatDetail({
   provisioning,
   showVault,
   toggleVault,
+  showMembers,
+  toggleMembers,
   draft,
   setDraft,
   onSendMsg,
@@ -1349,6 +1361,8 @@ function ChatDetail({
   provisioning: boolean;
   showVault: boolean;
   toggleVault: () => void;
+  showMembers: boolean;
+  toggleMembers: () => void;
   wstate: WalletState | null;
   draft: string;
   setDraft: (s: string) => void;
@@ -1390,6 +1404,9 @@ function ChatDetail({
               </div>
             ))}
         </div>
+        <button onClick={toggleMembers} title="Channel info" style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${showMembers ? C.orange : "rgba(255,255,255,.1)"}`, color: showMembers ? C.orange : "#C5C9CE", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", whiteSpace: "nowrap", padding: "9px 14px", borderRadius: 9, cursor: "pointer" }}>
+          <span style={{ fontFamily: MONO }}>{members.length}</span> Members
+        </button>
         {hasVault && (
           <button onClick={toggleVault} style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${showVault ? C.orange : "rgba(255,255,255,.1)"}`, color: showVault ? C.orange : "#C5C9CE", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", whiteSpace: "nowrap", padding: "9px 14px", borderRadius: 9, cursor: "pointer" }}>
             <span style={{ fontFamily: MONO }}>{quorum}</span> {showVault ? "Hide vault policy" : "Vault policy"}
@@ -1476,33 +1493,60 @@ function ChatDetail({
         {showVault && hasVault && (
           <VaultPanel chat={chat} setThreshold={setThreshold} removeKey={removeKey} proposeKey={proposeKey} />
         )}
-        <div style={{ flex: "0 0 296px", display: "flex", flexDirection: "column", gap: 14, minHeight: 0 }}>
-          <div style={{ background: "#15181C", border: "1px solid #2A2F36", borderRadius: 12, padding: 12 }}>
-            <div style={{ fontSize: 10, color: "#5E6369", letterSpacing: ".5px", marginBottom: 8 }}>
-              MEMBERS · {members.length}
+        {!isDirect && (
+          <div style={{ flex: "0 0 296px", display: "flex", flexDirection: "column", gap: 14, minHeight: 0 }}>
+            <OngoingProposals proposals={pendingApprovals} onSign={onSign} signingId={signingId} />
+            <AuditPanel audit={audit} />
+          </div>
+        )}
+      </div>
+
+      {showMembers && (
+        <>
+          <div onClick={toggleMembers} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 60 }} />
+          <div
+            role="dialog"
+            aria-label="Channel info"
+            style={{ position: "fixed", top: "50%", left: "50%", transform: "translate(-50%,-50%)", zIndex: 61, width: 380, maxWidth: "90vw", maxHeight: "80vh", overflowY: "auto", background: C.surface, border: `1px solid ${C.line2}`, borderRadius: 16, padding: 18, boxShadow: "0 24px 64px rgba(0,0,0,.6)" }}
+          >
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 8 }}>
+                  {chat.name}
+                  {chat.live && <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: ".4px", color: C.green, background: "rgba(63,185,80,.12)", padding: "2px 7px", borderRadius: 20 }}>LIVE</span>}
+                </div>
+                <div style={{ fontSize: 11.5, color: C.faint2, marginTop: 3 }}>
+                  {isDirect ? "Direct message" : "Channel"} · {members.length} member{members.length === 1 ? "" : "s"}
+                  {hasVault && <> · secured by a {quorum} vault</>}
+                </div>
+              </div>
+              <button onClick={toggleMembers} title="Close" aria-label="Close" style={{ flex: "0 0 auto", border: "none", background: "transparent", color: C.faint2, fontSize: 22, lineHeight: 1, cursor: "pointer", fontFamily: "inherit" }}>×</button>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+
+            <div style={{ fontSize: 10, color: "#5E6369", letterSpacing: ".5px", margin: "18px 0 8px" }}>MEMBERS · {members.length}</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              {members.length === 0 && <div style={{ fontSize: 11.5, color: C.faint, padding: "4px 6px" }}>No members loaded.</div>}
               {members.map((mem) => (
                 <button
                   key={mem.npub}
                   type="button"
-                  onClick={() => onMemberClick(mem)}
-                  style={{ display: "flex", alignItems: "center", gap: 9, background: "none", border: "none", padding: "5px 6px", borderRadius: 8, cursor: "pointer", textAlign: "left", color: "inherit" }}
+                  onClick={() => {
+                    toggleMembers();
+                    onMemberClick(mem);
+                  }}
+                  style={{ display: "flex", alignItems: "center", gap: 10, background: "none", border: "none", padding: "7px 6px", borderRadius: 8, cursor: "pointer", textAlign: "left", color: "inherit", width: "100%" }}
                 >
-                  <span style={{ width: 24, height: 24, borderRadius: 7, background: mem.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#0E1013", flex: "0 0 24px" }}>{mem.initials}</span>
-                  <span style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{mem.label}</span>
+                  <span style={{ width: 26, height: 26, borderRadius: 7, background: mem.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10.5, fontWeight: 700, color: "#0E1013", flex: "0 0 26px" }}>{mem.initials}</span>
+                  <span style={{ flex: 1, minWidth: 0, lineHeight: 1.2 }}>
+                    <span style={{ display: "block", fontSize: 12.5, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{mem.label}</span>
+                    <span style={{ display: "block", fontSize: 10.5, color: C.faint }}>{mem.role}</span>
+                  </span>
                 </button>
               ))}
             </div>
           </div>
-          {!isDirect && (
-            <>
-              <OngoingProposals proposals={pendingApprovals} onSign={onSign} signingId={signingId} />
-              <AuditPanel audit={audit} />
-            </>
-          )}
-        </div>
-      </div>
+        </>
+      )}
     </div>
   );
 }
