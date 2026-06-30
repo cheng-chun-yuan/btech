@@ -6,7 +6,7 @@ import { getDb } from "../_lib/db";
 import { getSessionUser, SESSION_COOKIE } from "../_lib/auth";
 import { addMember, recordAudit } from "../_lib/audit";
 import { runDemo } from "../_lib/btech";
-import { isChatMember, directCounterparty, resolveIdentity } from "../_lib/dm";
+import { directCounterparty, resolveIdentity, filterVisibleChats } from "../_lib/dm";
 import { initialsFor, colorForNpub } from "../_lib/avatar";
 import type { Chat, ChatMessage } from "../../ui/wallet/types";
 
@@ -55,9 +55,7 @@ export async function GET() {
   // Resolve the viewer so we can hide DMs they're not in and label each DM with
   // the *other* participant (the stored name is from the creator's POV).
   const viewer = getSessionUser(db, (await cookies()).get(SESSION_COOKIE)?.value);
-  const visible = chats.filter(
-    (c) => c.type !== "direct" || (viewer != null && isChatMember(db, c.id, viewer.npub)),
-  );
+  const visible = filterVisibleChats(db, viewer?.npub ?? null, chats);
   if (viewer) {
     for (const c of visible) {
       if (c.type !== "direct") continue;

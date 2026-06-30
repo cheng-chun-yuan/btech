@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import type { DB } from "./db";
-import { addMember, recordAudit } from "./audit";
+import { addMember, isMember, recordAudit } from "./audit";
 import { initialsFor, colorForNpub } from "./avatar";
 
 export type Member = {
@@ -59,6 +59,22 @@ export function directCounterparty(db: DB, chatId: string, meNpub: string): stri
     .prepare("SELECT npub FROM chat_members WHERE chat_id = ? AND npub != ? LIMIT 1")
     .get(chatId, meNpub) as { npub: string } | undefined;
   return row?.npub ?? null;
+}
+
+/** Visibility gate for the chat list. A `direct` chat is shown only to its
+ * strict members; any other chat (channel) is shown to members OR registered
+ * signers (`isMember`). An unauthenticated viewer (null) sees nothing. */
+export function filterVisibleChats<T extends { id: string; type: string }>(
+  db: DB,
+  viewerNpub: string | null,
+  chats: T[],
+): T[] {
+  if (viewerNpub == null) return [];
+  return chats.filter((c) =>
+    c.type === "direct"
+      ? isChatMember(db, c.id, viewerNpub)
+      : isMember(db, c.id, viewerNpub),
+  );
 }
 
 export function createOrFindDirectChat(
