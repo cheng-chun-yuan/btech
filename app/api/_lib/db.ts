@@ -8,7 +8,7 @@ import { migrateSubledger, seedConfig } from "./subledger";
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export function migrate(db: DB): void {
   db.pragma("journal_mode = WAL");
@@ -103,7 +103,18 @@ export function migrate(db: DB): void {
   const row = db.prepare("SELECT version FROM schema_meta LIMIT 1").get() as
     | { version: number }
     | undefined;
-  if (!row) db.prepare("INSERT INTO schema_meta (version) VALUES (?)").run(SCHEMA_VERSION);
+  if (!row) {
+    db.prepare("INSERT INTO schema_meta (version) VALUES (?)").run(SCHEMA_VERSION);
+  } else if (row.version < SCHEMA_VERSION) {
+    // v5: the cold/petty seed channels used to ship hand-typed placeholder
+    // receive addresses (and inert mock approvals). Drop those rows so seed()
+    // re-creates them clean — real DKG addresses are then provisioned lazily and
+    // their send approvals sign a real grouped HTSS round. Messages live in their
+    // own table, so this does not lose chat history.
+    db.prepare("DELETE FROM chats WHERE id IN ('cold', 'petty')").run();
+    db.prepare("DELETE FROM approvals WHERE id IN ('tx2', 'tx3')").run();
+    db.prepare("UPDATE schema_meta SET version = ?").run(SCHEMA_VERSION);
+  }
 }
 
 export function seed(db: DB): void {
@@ -117,7 +128,7 @@ export function seed(db: DB): void {
     VALUES (@id, @chat_id, NULL, @who, @handle, @initials, @color, @time, @text, @signed, @zaps, @created_at)
   `);
   const insertApproval = db.prepare(
-    "INSERT OR IGNORE INTO approvals (id, vault, kind, data_json, status, is_live, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+    "INSERT OR IGNORE INTO approvals (id, vault, kind, data_json, status, is_live, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
   );
 
   const seedTx = db.transaction(() => {
@@ -160,7 +171,7 @@ export function seed(db: DB): void {
       }
     }
     for (const a of MOCK_APPROVALS) {
-      insertApproval.run(a.id, a.vault, a.kind, JSON.stringify(a), a.status, now);
+      insertApproval.run(a.id, a.vault, a.kind, JSON.stringify(a), a.status, a.live ? 1 : 0, now);
     }
   });
   seedTx();
