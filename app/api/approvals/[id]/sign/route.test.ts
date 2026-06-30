@@ -134,6 +134,32 @@ describe("POST /api/approvals/[id]/sign — policy-change reshare", () => {
     expect(chat.tiers[0].keys[0]).toMatchObject({ id: "k1", name: "S1", device: "Active", status: "online" });
   });
 
+  it("ignores a signerSet on a role approval: one hand-picked signer can't ratify a reshare", async () => {
+    // SECURITY: a role/reshare approval that (wrongly) carries a signerSet must
+    // still be threshold-based. Seed one with a single selected signer but
+    // threshold 2 — the lone selected signer must NOT clear quorum, and a role
+    // approval must NEVER precommit even with a signerSet present.
+    const one = db.prepare("SELECT npub, label FROM signers WHERE participant_id = 1").get() as { npub: string; label: string };
+    const set = [{ participantId: 1, npub: one.npub, label: one.label }];
+    db.prepare("INSERT INTO approvals (id, vault, kind, data_json, status, is_live, created_at) VALUES ('rc1','#treasury-ops','role',?, 'pending',1,0)").run(
+      JSON.stringify({ id: "rc1", kind: "role", title: "Policy change", vault: "#treasury-ops", live: true, threshold: 2, basePolicyVersion: 0, signerSet: set, proposedPolicy }),
+    );
+
+    asUser(1);
+    const res = await postRc();
+    expect(res.status).toBe(200);
+    const { approval } = (await res.json()) as { approval: { status: string; proof?: { verified: boolean } } };
+    // One signer < threshold 2 → quorum NOT reached, stays pending.
+    expect(approval.status).toBe("pending");
+    expect(approval.proof?.verified).toBeFalsy();
+
+    // Role approvals skip precommit even when a signerSet is present.
+    expect(runPrecommit).not.toHaveBeenCalled();
+    // Quorum is threshold-based, not allSelectedSigned → no reshare, no version bump.
+    expect(runReshare).not.toHaveBeenCalled();
+    expect(chatRow().policyVersion ?? 0).toBe(0);
+  });
+
   it("rejects with 409 when the live policy moved on (stale basePolicyVersion)", async () => {
     seedRole(5); // chat is at version 0
     asUser(1);

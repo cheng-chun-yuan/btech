@@ -67,8 +67,19 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
   // Round 1 (collapsed two-round): a selected signer pre-commits their nonce as
   // they approve. The secret nonce stays in vaultd; we store only the public
   // package. Falls through to a plain vote when vaultd/ signerSet is absent.
+  //
+  // A policy-change (reshare) approval (kind:"role") must NEVER precommit, even
+  // if the propose route wrongly attached a signerSet — precommit belongs to the
+  // grouped payment round, and an orphaned vaultd session would leak. Defense in
+  // depth: gate precommit on the approval NOT being a role/reshare change.
   let precommitJson: string | null = null;
-  if (live && approval.signerSet && VAULTD_CONFIGURED && !approval.proof?.verified) {
+  if (
+    live &&
+    approval.signerSet &&
+    approval.kind !== "role" &&
+    VAULTD_CONFIGURED &&
+    !approval.proof?.verified
+  ) {
     try {
       const pc = await runPrecommit(
         { session: approval.id, participantId: signer.participant_id },
@@ -97,8 +108,13 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
   const signed = (
     db.prepare("SELECT COUNT(*) c FROM approval_signatures WHERE approval_id = ?").get(id) as { c: number }
   ).c;
-  const quorumReached = approval.signerSet
-    ? allSelectedSigned(approval.signerSet, signedNpubs(db, id))
+  // A role/reshare approval is ALWAYS threshold-based (the full current-policy
+  // quorum of DISTINCT signers) — never `allSelectedSigned`. Letting a signerSet
+  // govern its quorum would let a hand-picked 1-element set self-ratify a
+  // reshare; refuse that here regardless of what the propose route attached.
+  const useSelected = approval.signerSet && approval.kind !== "role";
+  const quorumReached = useSelected
+    ? allSelectedSigned(approval.signerSet!, signedNpubs(db, id))
     : signed >= approval.threshold;
 
   // Run the real grouped HTSS round ONCE — when the last required signer pushes
