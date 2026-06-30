@@ -217,6 +217,23 @@ impl WalletApp {
         }))
     }
 
+    /// Current grouped-policy summary read straight from the persisted
+    /// `grouped_config`: the full ratifier quorum (Σ each group's `required`,
+    /// via `GroupedThresholdConfig::required_signer_count`) plus a
+    /// `(rank, required, total)` row per group. vaultd's `/vault/policy`
+    /// surfaces this so the web layer can derive a reshare's required quorum
+    /// AUTHORITATIVELY instead of trusting a client-sent threshold. The policy
+    /// is fixed at construction, so no DKG/init is needed.
+    pub fn policy_summary(&self) -> (u16, Vec<(u16, u16, u16)>) {
+        let cfg = &self.vault.grouped_config;
+        let groups = cfg
+            .requirements
+            .iter()
+            .map(|r| (r.rank.0, r.required, r.total))
+            .collect();
+        (cfg.required_signer_count(), groups)
+    }
+
     /// Settle a real on-chain Taproot spend out of the vault: build the key-path
     /// transaction, run a grouped HTSS round per input signing the BIP341 sighash
     /// under the receive address' tweaked output key, and return the signed raw
@@ -409,6 +426,19 @@ mod tests {
         assert_eq!(report.aggregate_signature.len(), 128);
         assert_eq!(report.remaining_relay_events, 0);
         assert_eq!(app.repository().approval_count(), 1);
+    }
+
+    #[test]
+    fn policy_summary_reports_the_demo_quorum_and_groups() {
+        // The demo vault carries the seed 1/2 + 2/3 + 3/5 grouped policy, so the
+        // full ratifier quorum is 1 + 2 + 3 = 6 across exactly three groups. This
+        // is the value vaultd's /vault/policy returns so the web layer never has
+        // to trust a client-supplied threshold for a reshare.
+        let app = WalletApp::demo().unwrap();
+        let (quorum, groups) = app.policy_summary();
+        assert_eq!(quorum, 6);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups, vec![(0, 1, 2), (1, 2, 3), (2, 3, 5)]);
     }
 
     #[test]

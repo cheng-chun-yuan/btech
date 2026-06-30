@@ -140,6 +140,29 @@ async fn vault_state(
     Ok(Json(value))
 }
 
+/// Current grouped-policy quorum for a vault, computed AUTHORITATIVELY from its
+/// persisted `grouped_config` (never from the client). The web layer reads this
+/// to pin a reshare approval's required ratifier count, so a proposer can't send
+/// `threshold:1` and self-ratify the live treasury (whose tiers aren't mirrored
+/// into the web DB). `quorum` = Σ each group's `required`.
+async fn vault_policy(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<VaultQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let id = q.id.unwrap_or_else(|| "treasury".to_string());
+    let (quorum, groups) =
+        with_vault(&state, &id, |app| Ok(app.policy_summary())).map_err(err500)?;
+    let groups_json: Vec<serde_json::Value> = groups
+        .into_iter()
+        .map(|(rank, required, total)| {
+            serde_json::json!({ "rank": rank, "required": required, "total": total })
+        })
+        .collect();
+    Ok(Json(
+        serde_json::json!({ "quorum": quorum, "groups": groups_json }),
+    ))
+}
+
 async fn vault_sign(
     State(state): State<Arc<AppState>>,
     Query(q): Query<VaultQuery>,
@@ -261,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
     let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/vault/state", get(vault_state))
+        .route("/vault/policy", get(vault_policy))
         .route("/vault/sign", post(vault_sign))
         .route("/vault/sign/precommit", post(vault_sign_precommit))
         .route("/vault/sign/finalize", post(vault_sign_finalize))

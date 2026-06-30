@@ -4,9 +4,16 @@ import { migrate, seed } from "../_lib/db";
 import { syncSigners } from "../_lib/identity";
 import type { Approval } from "../../ui/wallet/types";
 
-const h = vi.hoisted(() => ({ token: "t" as string | undefined }));
+const h = vi.hoisted(() => ({ token: "t" as string | undefined, quorum: null as number | null }));
 vi.mock("next/headers", () => ({
   cookies: async () => ({ get: () => (h.token ? { value: h.token } : undefined) }),
+}));
+// vaultd is the AUTHORITATIVE source for the live treasury's reshare quorum (its
+// tiers are NOT mirrored into the web DB). Mock it like the existing reshare tests
+// mock the vaultd clients; `h.quorum` lets each test pick what vaultd "returns"
+// (a number, or null to simulate vaultd being unreachable/unconfigured).
+vi.mock("../_lib/btech", () => ({
+  runVaultQuorum: vi.fn(async () => h.quorum),
 }));
 
 import { POST } from "./route";
@@ -41,7 +48,7 @@ function setTreasuryTiers(db: ReturnType<typeof install>, tiers: { minNeed: numb
 }
 
 describe("POST /api/approvals", () => {
-  beforeEach(() => { h.token = "t"; });
+  beforeEach(() => { h.token = "t"; h.quorum = null; });
   afterEach(() => { (globalThis as unknown as { __btechDb?: unknown }).__btechDb = undefined; });
 
   it("defaults to the canonical valid signer set and derives threshold = 6", async () => {
@@ -154,5 +161,54 @@ describe("POST /api/approvals", () => {
     const { approval } = (await res.json()) as { approval: Approval };
     expect(approval.signerSet).toBeUndefined();
     expect(approval.threshold).toBe(5);
+  });
+
+  // The live treasury persists tiers:[] (its real 1/2+2/3+3/5 policy lives only in
+  // vaultd + the client), so Σ minNeed = 0. The route must then source the quorum
+  // AUTHORITATIVELY from vaultd (mocked to 6), NOT fall back to the client threshold.
+  it("sources the role threshold from vaultd when the treasury tiers are empty (NOT the client value)", async () => {
+    install(); // seeded treasury keeps tiers:[]
+    h.quorum = 6; // vaultd reports the real grouped quorum (1 + 2 + 3)
+    const req = new Request("http://x/api/approvals", {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Policy change",
+        vault: "#treasury-ops",
+        kind: "role",
+        proposedPolicy: {
+          tiers: [{ id: "t0", name: "Solo", rank: 0, required: 1, signers: [{ participantId: 1, npub: "n1", label: "A", rank: 0 }] }],
+        },
+        // Attacker attempts to self-ratify after one signer.
+        threshold: 1,
+        total: 1,
+      }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const { approval } = (await res.json()) as { approval: Approval };
+    expect(approval.signerSet).toBeUndefined();
+    expect(approval.threshold).toBe(6); // from vaultd — NOT the client's 1
+    expect(approval.total).toBe(6);
+  });
+
+  // Fail-closed: empty tiers AND vaultd indeterminate (null) → the route must 400,
+  // never silently accept a threshold:1 self-ratification.
+  it("fails closed with 400 when the current-policy quorum is indeterminate", async () => {
+    install(); // seeded treasury keeps tiers:[]
+    h.quorum = null; // vaultd unreachable / unconfigured
+    const req = new Request("http://x/api/approvals", {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Policy change",
+        vault: "#treasury-ops",
+        kind: "role",
+        proposedPolicy: {
+          tiers: [{ id: "t0", name: "Solo", rank: 0, required: 1, signers: [{ participantId: 1, npub: "n1", label: "A", rank: 0 }] }],
+        },
+        threshold: 1,
+      }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(400);
   });
 });

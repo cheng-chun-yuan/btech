@@ -6,6 +6,7 @@ import { getDb } from "../_lib/db";
 import { getSessionUser, SESSION_COOKIE } from "../_lib/auth";
 import { recordAudit, resolveChatId } from "../_lib/audit";
 import { resolveSignerSet, defaultSignerSet } from "../_lib/governance";
+import { runVaultQuorum } from "../_lib/btech";
 import { isBrickedPolicy } from "./policy-validate";
 import type { Approval } from "../../ui/wallet/types";
 
@@ -96,16 +97,26 @@ export async function POST(request: Request) {
     approval.basePolicyVersion = meta?.policyVersion ?? 0;
 
     // SECURITY: a policy-change approval must be ratified by the vault's CURRENT
-    // quorum — never by a proposer-picked signerSet. C's signerSet resolution above
-    // would (for a role approval) leave a default signerSet and set
-    // threshold = signerSet.length, which is a current-quorum bypass (a proposer
-    // could land threshold = 1 and self-ratify the reshare). Drop any signerSet and
-    // pin the threshold to the sum of the current policy tiers' minNeed. The client
-    // threshold is NOT trusted here; we only fall back to it when there is no policy.
+    // quorum — never by a proposer-picked signerSet, and NEVER by the client-sent
+    // threshold. C's signerSet resolution above would (for a role approval) leave
+    // a default signerSet and set threshold = signerSet.length, a current-quorum
+    // bypass (a proposer could land threshold = 1 and self-ratify the reshare).
+    // Drop any signerSet and derive the quorum server-side: prefer the sum of the
+    // current policy tiers' minNeed; for the live treasury vault (tiers NOT mirrored
+    // into the web DB → sum 0) source it AUTHORITATIVELY from vaultd's grouped_config.
+    // If neither yields a quorum we FAIL CLOSED with 400 rather than trust the client.
     delete approval.signerSet;
-    const quorum = (meta?.tiers ?? []).reduce((sum, t) => sum + (t.minNeed ?? 0), 0);
-    approval.threshold = quorum > 0 ? quorum : (body.threshold ?? 1);
-    approval.total = approval.threshold;
+    let quorum = (meta?.tiers ?? []).reduce((sum, t) => sum + (t.minNeed ?? 0), 0);
+    if (!quorum) quorum = (await runVaultQuorum(chatId)) ?? 0;
+    if (!quorum || quorum < 1) {
+      return NextResponse.json(
+        { error: "Cannot determine the current policy quorum for this vault." },
+        { status: 400 },
+      );
+    }
+    approval.threshold = quorum;
+    approval.total = quorum;
+    // NEVER use body.threshold for role approvals.
   }
 
   db.prepare(`

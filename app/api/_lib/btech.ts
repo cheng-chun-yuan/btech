@@ -161,6 +161,23 @@ export async function runSignApproval(
 /** True when btech-vaultd is configured (enables the collapsed two-round). */
 export const VAULTD_CONFIGURED = !!VAULTD_URL;
 
+/**
+ * Read the current-policy ratifier quorum (Σ each grouped tier's `required`) for
+ * `vaultId` AUTHORITATIVELY from btech-vaultd's `/vault/policy`. Returns `null`
+ * when vaultd is unconfigured or the request fails — callers MUST fail-closed on
+ * `null` rather than trust a client-supplied threshold. This is the only source
+ * of truth for the live treasury vault, whose tiers aren't mirrored into the web DB.
+ */
+export async function runVaultQuorum(vaultId: string): Promise<number | null> {
+  if (!VAULTD_URL) return null;
+  const res = await fetch(`${VAULTD_URL}/vault/policy?id=${encodeURIComponent(vaultId)}`).catch(
+    () => null,
+  );
+  if (!res?.ok) return null;
+  const data = (await res.json().catch(() => null)) as { quorum?: number } | null;
+  return typeof data?.quorum === "number" ? data.quorum : null;
+}
+
 export type PrecommitResult = { participant_id: number; nonce_package: unknown };
 
 /** Round 1: pre-commit one signer's nonce for `session`. Returns the public
