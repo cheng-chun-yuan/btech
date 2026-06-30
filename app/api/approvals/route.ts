@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 
 import { getDb } from "../_lib/db";
 import { getSessionUser, SESSION_COOKIE } from "../_lib/auth";
-import { recordAudit, resolveChatId } from "../_lib/audit";
+import { recordAudit, resolveChatId, isMember } from "../_lib/audit";
 import { resolveSignerSet, defaultSignerSet } from "../_lib/governance";
 import { runVaultQuorum } from "../_lib/btech";
 import { isBrickedPolicy } from "./policy-validate";
@@ -88,6 +88,27 @@ export async function POST(request: Request) {
       );
     }
     const chatId = resolveChatId(db, approval.vault);
+
+    // Membership gate (spec): only a member of this vault — a registered signer
+    // or an explicit chat member — may propose a policy change. A non-member
+    // proposer is rejected 403 and the attempt is audited as a failed reshare.
+    // Scoped to the policy-change branch ONLY; payment (kind:"send") proposals
+    // are unaffected.
+    if (!isMember(db, chatId, user.npub)) {
+      recordAudit(db, {
+        chatId,
+        actorNpub: user.npub,
+        actorLabel: user.label,
+        action: "reshare",
+        outcome: "failed",
+        detail: `${approval.title}: not a member of this vault`,
+      });
+      return NextResponse.json(
+        { error: "You are not a member of this vault." },
+        { status: 403 },
+      );
+    }
+
     const chatRow = db.prepare("SELECT data_json FROM chats WHERE id = ?").get(chatId) as
       | { data_json: string }
       | undefined;

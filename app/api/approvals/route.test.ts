@@ -211,4 +211,34 @@ describe("POST /api/approvals", () => {
     const res = await POST(req);
     expect(res.status).toBe(400);
   });
+
+  // Membership gate (spec): a kind:"role" + proposedPolicy proposal from a user who
+  // is NEITHER a registered signer NOR an explicit chat member of the vault must be
+  // rejected 403 and persist NO approval row (audited as a failed reshare).
+  it("rejects a policy-change proposal from a non-member with 403 and persists no approval", async () => {
+    const db = install();
+    // Outsider: a real session user, but absent from `signers` and `chat_members`.
+    db.prepare("INSERT INTO users (npub, label, role, created_at) VALUES ('npub-outsider', 'Outsider', 'guest', 0)").run();
+    db.prepare("INSERT INTO sessions (token, npub, created_at, expires_at) VALUES ('outsider-t', 'npub-outsider', 0, 4102444800000)").run();
+    h.token = "outsider-t";
+    setTreasuryTiers(db, [{ minNeed: 1, n: 2 }, { minNeed: 2, n: 3 }, { minNeed: 3, n: 5 }]);
+
+    const req = new Request("http://x/api/approvals", {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Policy change",
+        vault: "#treasury-ops",
+        kind: "role",
+        proposedPolicy: {
+          tiers: [{ id: "t0", name: "Solo", rank: 0, required: 1, signers: [{ participantId: 1, npub: "n1", label: "A", rank: 0 }] }],
+        },
+      }),
+    });
+    const countApprovals = () => (db.prepare("SELECT COUNT(*) c FROM approvals").get() as { c: number }).c;
+    const before = countApprovals();
+    const res = await POST(req);
+    expect(res.status).toBe(403);
+    // No approval row was persisted for the rejected proposal.
+    expect(countApprovals()).toBe(before);
+  });
 });
