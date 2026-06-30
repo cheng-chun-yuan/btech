@@ -8,6 +8,7 @@ import type { EventTemplate } from "nostr-tools";
 import { ApprovalCard } from "./approval-card";
 import { buildLiveVault } from "./data";
 import { useBtcPrice } from "./use-btc-price";
+import { ProfilePopover } from "./profile-popover";
 import type {
   Approval,
   Chat,
@@ -142,6 +143,13 @@ export default function Wallet() {
   const [stateError, setStateError] = useState<string | null>(null);
   const [signingId, setSigningId] = useState<string | null>(null);
   const [me, setMe] = useState<{ npub: string; label: string; participant_id: number | null } | null>(null);
+  const [popover, setPopover] = useState<{
+    npub: string;
+    name: string;
+    initials: string;
+    color: string;
+    role?: string;
+  } | null>(null);
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [audit, setAudit] = useState<{ entries?: AuditEntryUI[]; restricted?: boolean }>({});
   const [chainTip, setChainTip] = useState<number | null>(null);
@@ -543,6 +551,26 @@ export default function Wallet() {
       void refreshAudit(cid);
     })();
   };
+  const startDm = useCallback(
+    async (targetNpub: string) => {
+      setPopover(null);
+      const res = await fetch("/api/dms", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ targetNpub }),
+      });
+      if (!res.ok) {
+        setStateError(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "Could not open DM");
+        return;
+      }
+      const { chat } = (await res.json()) as { chat: Chat };
+      setChats((prev) => (prev.some((c) => c.id === chat.id) ? prev : [...prev, chat]));
+      setActiveChat(chat.id);
+      setView("chat");
+    },
+    [],
+  );
+
   const submitSend = () => {
     const amt = parseFloat(sendForm.amount);
     if (!activeChat || !sendForm.dest.trim() || !(amt > 0)) return;
@@ -752,12 +780,28 @@ export default function Wallet() {
               setThreshold={setThreshold}
               removeKey={removeKey}
               proposeKey={proposeKey}
+              onAuthorClick={(m) =>
+                m.authorNpub &&
+                setPopover({ npub: m.authorNpub, name: m.who, initials: m.initials, color: m.color })
+              }
             />
           )}
 
           {view === "plan" && <Plan />}
         </div>
       </main>
+      {popover && me && (
+        <ProfilePopover
+          npub={popover.npub}
+          name={popover.name}
+          initials={popover.initials}
+          color={popover.color}
+          role={popover.role}
+          isSelf={popover.npub === me.npub}
+          onStartDm={(npub) => void startDm(npub)}
+          onClose={() => setPopover(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1212,6 +1256,7 @@ function ChatDetail({
   setThreshold,
   removeKey,
   proposeKey,
+  onAuthorClick,
 }: {
   chat: Chat;
   audit: { entries?: AuditEntryUI[]; restricted?: boolean };
@@ -1231,6 +1276,7 @@ function ChatDetail({
   setThreshold: (chatId: string, tierId: string, delta: number) => () => void;
   removeKey: (chatId: string, tierId: string, keyId: string) => () => void;
   proposeKey: (chatId: string, tierId: string) => () => void;
+  onAuthorClick: (m: ChatMessage) => void;
 }) {
   const quorum = quorumOf(chat.tiers);
   const hasVault = !!chat.vaultStatus || chat.tiers.length > 0;
@@ -1270,10 +1316,21 @@ function ChatDetail({
           <div style={{ flex: 1, overflowY: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
             {chat.messages.map((m) => (
               <div key={m.id} style={{ display: "flex", gap: 12 }}>
-                <span style={{ width: 34, height: 34, borderRadius: 10, background: m.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color: C.bg, flex: "0 0 34px" }}>{m.initials}</span>
+                <button
+                  type="button"
+                  onClick={() => m.authorNpub && onAuthorClick(m)}
+                  disabled={!m.authorNpub}
+                  title={m.authorNpub ? "View profile" : undefined}
+                  style={{ background: "none", border: "none", padding: 0, cursor: m.authorNpub ? "pointer" : "default" }}
+                >
+                  <span style={{ width: 34, height: 34, borderRadius: 10, background: m.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color: C.bg, flex: "0 0 34px" }}>{m.initials}</span>
+                </button>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
-                    <span style={{ fontSize: 13, fontWeight: 600 }}>{m.who}</span>
+                    <span
+                      onClick={() => m.authorNpub && onAuthorClick(m)}
+                      style={{ fontSize: 13, fontWeight: 600, cursor: m.authorNpub ? "pointer" : "default" }}
+                    >{m.who}</span>
                     <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{m.handle}</span>
                     <span style={{ fontSize: 10.5, color: C.faint }}>{m.time}</span>
                     {m.signed && <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: ".3px", color: C.green, background: "rgba(63,185,80,.12)", padding: "2px 7px", borderRadius: 20 }}>SIGNED EVENT</span>}
