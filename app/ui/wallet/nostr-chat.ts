@@ -1,5 +1,6 @@
-import { nip19 } from "nostr-tools";
-import type { Event, EventTemplate } from "nostr-tools";
+import { nip19, SimplePool } from "nostr-tools";
+import type { Event, EventTemplate, Filter } from "nostr-tools";
+import type { NostrSigner } from "./nostr-signer";
 
 export const CHAT_KIND = 23333;
 export type ChatScope = "dm" | "group";
@@ -48,4 +49,72 @@ export function parseChatEvent(ev: Event): { chatId: string; scope: string; auth
   const scope = ev.tags.find((t) => t[0] === "chat")?.[1];
   if (!chatId || !scope) return null;
   return { chatId, scope, authorNpub: npubFromHex(ev.pubkey) };
+}
+
+export type DecryptedMessage = {
+  id: string;
+  chatId: string;
+  authorNpub: string;
+  text: string;
+  createdAt: number;
+};
+
+/** Reusable relay chat client for BOTH dm and group scopes. */
+export class NostrChatClient {
+  private readonly pool = new SimplePool();
+  private readonly relays: string[];
+  private readonly meHex: string;
+  private readonly seen = new Set<string>(); // dedup by event id
+
+  constructor(
+    private readonly signer: NostrSigner,
+    private readonly meNpub: string,
+    relayUrl: string,
+  ) {
+    this.relays = [relayUrl];
+    this.meHex = pubHexFromNpub(meNpub);
+  }
+
+  /** Fan-out: encrypt + sign + publish one kind-23333 event per recipient (incl self). */
+  async publish(chatId: string, scope: ChatScope, memberNpubs: string[], text: string): Promise<void> {
+    const createdAt = Math.floor(Date.now() / 1000);
+    for (const recipient of fanoutRecipients(memberNpubs, this.meNpub)) {
+      const ciphertext = await this.signer.encrypt(recipient, text);
+      const ev = await this.signer.signEvent(
+        buildChatEventTemplate(chatId, scope, recipient, ciphertext, createdAt),
+      );
+      // publish() returns one promise per relay; succeed if any relay accepts.
+      await Promise.any(this.pool.publish(this.relays, ev)).catch(() => {
+        throw new Error("relay rejected the message");
+      });
+    }
+  }
+
+  /** Subscribe to my chats: backfill + live. Calls onMessage for each decryptable
+   * event addressed to me, deduped by event id. Returns a closer. */
+  subscribe(chatIds: string[], onMessage: (m: DecryptedMessage) => void): { close: () => void } {
+    const filter: Filter = { kinds: [CHAT_KIND], "#t": chatIds, limit: 500 };
+    const sub = this.pool.subscribeMany(this.relays, filter, {
+      onevent: (ev) => {
+        if (this.seen.has(ev.id)) return;
+        this.seen.add(ev.id);
+        if (!isAddressedToMe(ev, this.meHex)) return;
+        const parsed = parseChatEvent(ev);
+        if (!parsed) return;
+        void this.signer
+          .decrypt(parsed.authorNpub, ev.content)
+          .then((text) =>
+            onMessage({ id: ev.id, chatId: parsed.chatId, authorNpub: parsed.authorNpub, text, createdAt: ev.created_at }),
+          )
+          .catch(() => {
+            /* not decryptable by me — ignore */
+          });
+      },
+    });
+    return { close: () => sub.close() };
+  }
+
+  close(): void {
+    this.pool.close(this.relays);
+  }
 }
