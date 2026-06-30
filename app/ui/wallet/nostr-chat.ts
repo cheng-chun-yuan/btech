@@ -118,3 +118,8 @@ export class NostrChatClient {
     this.pool.close(this.relays);
   }
 }
+
+/** Browser relay URL (NEXT_PUBLIC_ is inlined at build time). */
+export function relayUrl(): string {
+  return process.env.NEXT_PUBLIC_NOSTR_RELAY ?? "ws://127.0.0.1:7777";
+}
