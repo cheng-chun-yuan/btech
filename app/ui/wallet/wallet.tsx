@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
@@ -798,9 +797,6 @@ function Sidebar({
       </div>
 
       <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
-        <Link href="/console" style={{ fontSize: 11.5, color: C.faint2, textDecoration: "none", padding: "0 8px", display: "flex", alignItems: "center", gap: 7 }}>
-          <span style={{ color: C.orange }}>↗</span> DKGKit protocol console
-        </Link>
         <div style={{ background: "rgba(247,147,26,.07)", border: "1px solid rgba(247,147,26,.22)", borderRadius: 12, padding: "13px 14px" }}>
           <div style={{ fontSize: 11, color: C.sand, letterSpacing: ".3px", marginBottom: 6 }}>SELF-CUSTODY</div>
           <div style={{ fontSize: 12.5, color: "#C5C9CE", lineHeight: 1.45 }}>No keys held by BTech. Your quorum, your coins.</div>
