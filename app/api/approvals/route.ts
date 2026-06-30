@@ -5,6 +5,7 @@ import { randomBytes } from "node:crypto";
 import { getDb } from "../_lib/db";
 import { getSessionUser, SESSION_COOKIE } from "../_lib/auth";
 import { recordAudit, resolveChatId } from "../_lib/audit";
+import { resolveSignerSet, defaultSignerSet } from "../_lib/governance";
 import type { Approval } from "../../ui/wallet/types";
 
 export const runtime = "nodejs";
@@ -37,10 +38,26 @@ export async function POST(request: Request) {
   if (!body.title || !body.vault) {
     return NextResponse.json({ error: "title and vault required" }, { status: 400 });
   }
+
+  // Propose-picks-signers: the proposer may send explicit `signerNpubs`; else we
+  // default to the vault's canonical valid set (when it has a signer roster).
+  let signerSet = body.signerSet;
+  try {
+    if (Array.isArray((body as { signerNpubs?: string[] }).signerNpubs)) {
+      signerSet = resolveSignerSet(db, (body as { signerNpubs: string[] }).signerNpubs);
+    } else if (!signerSet) {
+      const def = defaultSignerSet(db);
+      if (def.length > 0) signerSet = def;
+    }
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "invalid signer set" },
+      { status: 400 },
+    );
+  }
+
   const approval: Approval = {
     kind: "send",
-    threshold: 1,
-    total: 1,
     signed: 0,
     youSigned: false,
     status: "pending",
@@ -50,6 +67,11 @@ export async function POST(request: Request) {
     id: body.id ?? `tx_${randomBytes(5).toString("hex")}`,
     title: body.title,
     vault: body.vault,
+    signerSet,
+    // signerSet (when present) is the quorum, so it sets threshold/total; these
+    // sit AFTER ...body so they win over whatever the client sent.
+    threshold: signerSet ? signerSet.length : (body.threshold ?? 1),
+    total: signerSet ? signerSet.length : (body.total ?? 1),
   } as Approval;
 
   db.prepare(`
