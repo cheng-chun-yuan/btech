@@ -48,6 +48,8 @@ const SCHEMA = `
     fee_gas TEXT,
     proceeds_twd TEXT,
     settle_amount_usd TEXT,
+    cogs_twd TEXT,
+    dest_address TEXT,
     status TEXT NOT NULL,
     reject_reason TEXT,
     created_at INTEGER NOT NULL
@@ -135,6 +137,11 @@ const SCHEMA = `
     ref TEXT,
     detail TEXT,
     created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS sl_own_wallet (
+    address TEXT PRIMARY KEY,
+    label TEXT
   );
 `;
 
@@ -278,9 +285,11 @@ export function insertEvent(
   db.prepare(
     `INSERT OR REPLACE INTO sl_event
        (event_id, type, timestamp, wallet_id, asset, qty, counterparty, invoice_no,
-        tx_hash, fee_gas, proceeds_twd, settle_amount_usd, status, reject_reason, created_at)
+        tx_hash, fee_gas, proceeds_twd, settle_amount_usd, cogs_twd, dest_address,
+        status, reject_reason, created_at)
      VALUES (@event_id, @type, @timestamp, @wallet_id, @asset, @qty, @counterparty, @invoice_no,
-             @tx_hash, @fee_gas, @proceeds_twd, @settle_amount_usd, @status, @reject_reason, @created_at)`,
+             @tx_hash, @fee_gas, @proceeds_twd, @settle_amount_usd, @cogs_twd, @dest_address,
+             @status, @reject_reason, @created_at)`,
   ).run({
     event_id: ev.event_id,
     type: ev.type,
@@ -294,10 +303,25 @@ export function insertEvent(
     fee_gas: ev.fee_gas ?? null,
     proceeds_twd: ev.proceeds_twd ?? null,
     settle_amount_usd: ev.settle_amount_usd ?? null,
+    cogs_twd: ev.cogs_twd ?? null,
+    dest_address: ev.dest_address ?? null,
     status,
     reject_reason: rejectReason ?? null,
     created_at: ++eventSeq,
   });
+}
+
+/** Register one of the company's own wallet/vault addresses (B inference). */
+export function registerOwnWallet(db: DB, address: string, label?: string): void {
+  db.prepare("INSERT OR REPLACE INTO sl_own_wallet (address, label) VALUES (?, ?)").run(
+    address,
+    label ?? null,
+  );
+}
+
+/** Is this destination one of the company's own addresses? (entity-internal) */
+export function isOwnAddress(db: DB, address: string): boolean {
+  return !!db.prepare("SELECT 1 FROM sl_own_wallet WHERE address=?").get(address);
 }
 
 export function insertException(

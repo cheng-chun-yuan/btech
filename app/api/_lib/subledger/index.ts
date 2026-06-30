@@ -11,6 +11,8 @@ export {
   seedConfig,
   insertPrice,
   insertMonetaryItem,
+  registerOwnWallet,
+  isOwnAddress,
   getJournalEntries,
   openTestSubledgerDb,
   type DB,

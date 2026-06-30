@@ -38,6 +38,8 @@ export interface SubledgerEvent {
   proceeds_twd?: string | null; // SELL / OFFRAMP bank proceeds
   settle_amount_usd?: string | null; // RECEIVE_SETTLE_AR / PAY_SUPPLIER value settled
   cogs_twd?: string | null; // RECEIVE_NONCASH cost of goods sold
+  /** Destination address of a send; if it is an own address -> internal (B). */
+  dest_address?: string | null;
 }
 
 // ---- Classification & measurement config (§4, §10) -------------------------

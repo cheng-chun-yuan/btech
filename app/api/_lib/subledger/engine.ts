@@ -22,6 +22,7 @@ import {
   getMonetaryItem,
   getOpenMonetaryItems,
   updateMonetaryItem,
+  isOwnAddress,
   insertEvent,
   insertException,
   insertJournalEntry,
@@ -463,6 +464,10 @@ const BUILDERS: Partial<Record<SubledgerEvent["type"], Builder>> = {
   PERIODEND_REVALUE: periodEnd,
 };
 
+// Send/disposal types that could in fact be a move to the company's own wallet,
+// and so get reclassified to internal when the destination is an own address (B).
+const SEND_RECLASSIFIABLE = new Set<SubledgerEvent["type"]>(["SELL", "OFFRAMP", "PAY_SUPPLIER"]);
+
 /**
  * INV-3 correction: a posted entry is never edited or deleted. To correct it,
  * post a reversing entry (DR/CR swapped) that references the original; both are
@@ -496,7 +501,19 @@ export function ingest(db: DB, ev: SubledgerEvent): IngestResult {
     return { posted: false, reason: v.reason };
   }
 
-  const builder = BUILDERS[ev.type];
+  // Approach B: a send whose destination is one of the company's own addresses
+  // is actually a self-move, not a disposal — reroute it to the internal-transfer
+  // (gas-only) builder. Acquisitions (BUY/RECEIVE_*) are exempt: their dest is
+  // always your own receive address. Explicit INTERNAL_TRANSFER already maps via
+  // BUILDERS, so the explicit type still wins.
+  let builder = BUILDERS[ev.type];
+  if (
+    SEND_RECLASSIFIABLE.has(ev.type) &&
+    ev.dest_address &&
+    isOwnAddress(db, ev.dest_address)
+  ) {
+    builder = internalTransfer;
+  }
   if (!builder) {
     const reason = `no posting rule for ${ev.type}`;
     insertEvent(db, ev, "quarantined", reason);
