@@ -247,3 +247,59 @@ export function runSessionProof(sessionId: string): Promise<SessionProofReport> 
   const id = sessionId.trim().length > 0 ? sessionId.trim() : "btech-session-proof";
   return runBtech(["--session-proof-json", "--session-id", id]) as Promise<SessionProofReport>;
 }
+
+/**
+ * Wire form of the Rust `GroupedThresholdConfig` (dkgkit-core). The newtype
+ * structs `ParticipantId(u16)`/`Rank(u16)` serde-serialize as bare numbers, so
+ * `id`/`rank` are plain numbers — match this shape EXACTLY or vaultd rejects it.
+ */
+export type GroupedConfigWire = {
+  participants: { id: number; rank: number; label: string | null }[];
+  requirements: { rank: number; required: number; total: number }[];
+};
+
+/** Flatten a tiered policy into the grouped-threshold wire config: every tier's
+ * signers become participants at that tier's rank, and each tier yields one
+ * requirement `{ rank, required, total: signers.length }`. */
+export function policyConfigToWire(
+  p: import("../../ui/wallet/types").PolicyConfig,
+): GroupedConfigWire {
+  const participants = p.tiers.flatMap((t) =>
+    t.signers.map((s) => ({ id: s.participantId, rank: t.rank, label: s.label as string | null })),
+  );
+  const requirements = p.tiers.map((t) => ({
+    rank: t.rank,
+    required: t.required,
+    total: t.signers.length,
+  }));
+  return { participants, requirements };
+}
+
+export type ReshareParams = {
+  session: string;
+  signerSet: number[];
+  newConfig: GroupedConfigWire;
+  policyFingerprint: string;
+};
+
+/** Authorize + apply a vault policy reshare via btech-vaultd. Requires vaultd —
+ *  the reshare is stateful and cannot run through the one-shot CLI. */
+export async function runReshare(p: ReshareParams, vaultId = "treasury"): Promise<DemoReport> {
+  if (!VAULTD_URL) {
+    throw new Error("BTECH_VAULTD_URL is required to apply a policy reshare");
+  }
+  const res = await fetch(`${VAULTD_URL}/vault/reshare?id=${encodeURIComponent(vaultId)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      session: p.session,
+      signer_set: p.signerSet,
+      new_config: p.newConfig,
+      policy_fingerprint: p.policyFingerprint,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`vaultd reshare failed: ${res.status} ${await res.text().catch(() => "")}`);
+  }
+  return (await res.json()) as DemoReport;
+}

@@ -11,6 +11,7 @@ import { useBtcPrice } from "./use-btc-price";
 import { ProfilePopover } from "./profile-popover";
 import { resolveSigner, type NostrSigner } from "./nostr-signer";
 import { NostrChatClient, relayUrl, scopeFor, type DecryptedMessage } from "./nostr-chat";
+import { mergeNewChats } from "./chat-merge";
 import type {
   Approval,
   Chat,
@@ -362,6 +363,10 @@ export default function Wallet() {
           const liveVault = buildLiveVault(ws);
           const liveChat: Chat = {
             ...liveVault,
+            // buildLiveVault has no member roster, so carry over the API's member
+            // npubs — without them treasury contributes nothing to the relay
+            // subscription's known-author gate and its messages get dropped.
+            memberNpubs: apiTreasury?.memberNpubs ?? liveVault.memberNpubs,
             messages: [...liveVault.messages, ...(apiTreasury?.messages ?? [])],
           };
           setChats([liveChat, ...apiChats.filter((c) => c.id !== "treasury")]);
@@ -384,6 +389,30 @@ export default function Wallet() {
       cancelled = true;
     };
   }, [handleSessionExpired]);
+
+  // Poll for chats created after our initial load — e.g. a DM a peer just opened
+  // with us — so they surface in the sidebar and the relay subscription (keyed on
+  // the chat-id set) picks them up without a full reload. We only APPEND unknown
+  // chats; existing ones keep their live-vault merge + fetched balances.
+  useEffect(() => {
+    if (!me) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/chats");
+        if (!res.ok || cancelled) return;
+        const fresh = ((await res.json()) as { chats?: Chat[] }).chats ?? [];
+        if (!cancelled) setChats((prev) => mergeNewChats(prev, fresh));
+      } catch {
+        /* transient — retry on the next tick */
+      }
+    };
+    const h = setInterval(() => void poll(), 7000);
+    return () => {
+      cancelled = true;
+      clearInterval(h);
+    };
+  }, [me]);
 
   const go = (v: View) => () => {
     setView(v);
@@ -1472,6 +1501,30 @@ function ChatDetail({
       <div style={{ display: "flex", gap: 18, flex: 1, minHeight: 0 }}>
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", background: "#101216", border: `1px solid ${C.line2}`, borderRadius: 16, overflow: "hidden" }}>
           <div style={{ flex: 1, overflowY: "auto", padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
+            {/* Seeded/historical context for channels (plaintext demo content).
+                DMs are relay-only — their persisted rows may be ciphertext from the
+                pre-relay path — so we render stored history for channels only. */}
+            {chat.type !== "direct" &&
+              chat.messages.map((m) => (
+                <div key={m.id} style={{ display: "flex", gap: 12 }}>
+                  <button
+                    type="button"
+                    onClick={() => m.authorNpub && onAuthorClick({ npub: m.authorNpub, name: m.who, initials: m.initials, color: m.color })}
+                    disabled={!m.authorNpub}
+                    title={m.authorNpub ? "View profile" : undefined}
+                    style={{ background: "none", border: "none", padding: 0, cursor: m.authorNpub ? "pointer" : "default" }}
+                  >
+                    <span style={{ width: 34, height: 34, borderRadius: 10, background: m.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color: C.bg, flex: "0 0 34px" }}>{m.initials}</span>
+                  </button>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 13, fontWeight: 600 }}>{m.who}</span>
+                      <span style={{ fontSize: 10.5, color: C.faint }}>{m.time}</span>
+                    </div>
+                    <div style={{ fontSize: 13, color: "#C5C9CE", lineHeight: 1.55, marginTop: 4 }}>{m.text}</div>
+                  </div>
+                </div>
+              ))}
             {relayMessages.map((m) => {
               const mem = members.find((x) => x.npub === m.authorNpub);
               const who = m.authorNpub === meNpub ? "You" : mem?.label ?? `${m.authorNpub.slice(0, 12)}…`;
@@ -1497,6 +1550,17 @@ function ChatDetail({
                 </div>
               );
             })}
+            {(chat.type === "direct"
+              ? relayMessages.length === 0
+              : chat.messages.length === 0 && relayMessages.length === 0) && (
+              <div style={{ margin: "auto", textAlign: "center", color: C.faint, fontSize: 12.5, maxWidth: 300, lineHeight: 1.6 }}>
+                {relayConnected === false
+                  ? "Relay offline — messages can't be delivered right now."
+                  : relayConnected === null
+                    ? "Connecting to the relay…"
+                    : "No messages yet. Say hello — messages are NIP-44 encrypted and delivered peer-to-peer over the relay."}
+              </div>
+            )}
           </div>
           <div style={{ flex: "0 0 auto", borderTop: `1px solid ${C.line}`, padding: "14px 16px" }}>
             {hasVault && sendForm.open && (

@@ -12,6 +12,18 @@ describe("nostr-chat helpers", () => {
     expect(scopeFor("channel")).toBe("group");
   });
 
+  it("CHAT_KIND is a relay-stored (regular) kind, not ephemeral", () => {
+    // NIP-01 kind ranges: 1000–9999 = regular (relays store every event and
+    // backfill it on a new REQ). 10000–19999 = replaceable, 20000–29999 =
+    // EPHEMERAL (relays do NOT persist these), 30000–39999 = addressable.
+    // Chat history relies on the relay storing + backfilling every message, so
+    // CHAT_KIND MUST stay in the regular range. Kind 23333 was ephemeral, which
+    // is exactly why messages vanished on reload / user switch — the relay never
+    // stored them and the limit:500 backfill came back empty.
+    expect(CHAT_KIND).toBeGreaterThanOrEqual(1000);
+    expect(CHAT_KIND).toBeLessThan(10000);
+  });
+
   it("fanoutRecipients includes self and dedups", () => {
     const r = fanoutRecipients(["npub_a", "npub_b", "npub_me"], "npub_me");
     expect(new Set(r)).toEqual(new Set(["npub_a", "npub_b", "npub_me"]));

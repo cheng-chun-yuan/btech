@@ -6,6 +6,7 @@ import { getDb } from "../_lib/db";
 import { getSessionUser, SESSION_COOKIE } from "../_lib/auth";
 import { recordAudit, resolveChatId } from "../_lib/audit";
 import { resolveSignerSet, defaultSignerSet } from "../_lib/governance";
+import { isBrickedPolicy } from "./policy-validate";
 import type { Approval } from "../../ui/wallet/types";
 
 export const runtime = "nodejs";
@@ -73,6 +74,25 @@ export async function POST(request: Request) {
     threshold: signerSet ? signerSet.length : (body.threshold ?? 1),
     total: signerSet ? signerSet.length : (body.total ?? 1),
   } as Approval;
+
+  // Policy-change proposals (kind:"role" + proposedPolicy): hard-block a bricked
+  // policy (would freeze the vault forever) and stamp the basePolicyVersion the
+  // proposal was authored against (a lost-update guard checked later at apply).
+  if (approval.kind === "role" && approval.proposedPolicy) {
+    if (isBrickedPolicy(approval.proposedPolicy)) {
+      return NextResponse.json(
+        { error: "Policy would lock the vault — every tier must be satisfiable." },
+        { status: 400 },
+      );
+    }
+    const chatId = resolveChatId(db, approval.vault);
+    const chatRow = db.prepare("SELECT data_json FROM chats WHERE id = ?").get(chatId) as
+      | { data_json: string }
+      | undefined;
+    approval.basePolicyVersion = chatRow
+      ? (JSON.parse(chatRow.data_json).policyVersion ?? 0)
+      : 0;
+  }
 
   db.prepare(`
     INSERT INTO approvals (id, vault, kind, data_json, status, is_live, created_at)

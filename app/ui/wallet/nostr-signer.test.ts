@@ -39,13 +39,13 @@ describe("LocalKeySigner.signEvent", () => {
     const sk = generateSecretKey();
     const signer = new LocalKeySigner(sk);
     const ev = await signer.signEvent({
-      kind: 23333,
+      kind: 9233,
       created_at: 1700000000,
       tags: [["t", "chat1"], ["chat", "dm"]],
       content: "hello",
     });
     expect(verifyEvent(ev)).toBe(true);
     expect(ev.pubkey).toBe(getPublicKey(sk));
-    expect(ev.kind).toBe(23333);
+    expect(ev.kind).toBe(9233);
   });
 });

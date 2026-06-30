@@ -21,6 +21,28 @@ export type Tier = {
   keys: SignerKey[];
 };
 
+/** A signer slot within a policy tier. `participantId` aligns with the Rust
+ * signer set; `rank` mirrors the owning tier's rank for convenient flattening. */
+export type PolicySigner = { participantId: number; npub: string; label: string; rank: number };
+
+/** A grouped-threshold tier: `required`-of-`signers.length` at this `rank`. */
+export type PolicyTier = {
+  id: string;
+  name: string;
+  rank: number;
+  required: number;
+  signers: PolicySigner[];
+};
+
+/** The full editable vault policy (one or more tiers). */
+export type PolicyConfig = { tiers: PolicyTier[] };
+
+/** One precomputed human-readable line of a policy change. */
+export type PolicyDiffItem = {
+  kind: "add-signer" | "remove-signer" | "threshold" | "add-tier" | "remove-tier";
+  text: string;
+};
+
 export type ChatMessage = {
   id: string;
   who: string;
@@ -64,6 +86,8 @@ export type Chat = {
   counterpartyNpub?: string;
   /** npubs of this chat's members (used to author-gate inbound relay messages). */
   memberNpubs?: string[];
+  /** Monotonic version of the active policy; bumped on each applied reshare. */
+  policyVersion?: number;
   /** Real group x-only public key (live vault only). */
   groupKey?: string;
   tiers: Tier[];
@@ -113,6 +137,12 @@ export type Approval = {
   proof?: SigningProof;
   /** On-chain txid, populated once the approval is broadcast. */
   txid?: string;
+  /** Policy-change approvals (kind:"role"): the full new policy to reshare into. */
+  proposedPolicy?: PolicyConfig;
+  /** Precomputed human-readable diff vs. the policy at propose time. */
+  policyDiff?: PolicyDiffItem[];
+  /** The vault policyVersion this proposal was authored against (lost-update guard). */
+  basePolicyVersion?: number;
 };
 
 export type SigningProof = {

@@ -17,7 +17,10 @@ use std::time::{Duration, Instant};
 use dkgkit_sdk::bitcoin::sha256;
 use nostr_sdk::prelude::*;
 
-const CHAT_KIND: u16 = 23333;
+// Regular (relay-stored) kind in NIP-01's 1000–9999 range so the relay persists
+// and backfills messages. Must match CHAT_KIND in app/ui/wallet/nostr-chat.ts.
+// (Was 23333 — an ephemeral kind the relay never stored, breaking chat history.)
+const CHAT_KIND: u16 = 9233;
 
 fn secret_for(id: u16) -> [u8; 32] {
     sha256(format!("btech-signer-v1:{id}").as_bytes())
