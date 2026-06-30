@@ -2,7 +2,11 @@ import { nip19, SimplePool } from "nostr-tools";
 import type { Event, EventTemplate, Filter } from "nostr-tools";
 import type { NostrSigner } from "./nostr-signer";
 
-export const CHAT_KIND = 23333;
+// Regular (relay-stored) kind in NIP-01's 1000–9999 range, so the relay persists
+// every message and backfills it on reconnect. The previous value (23333) sat in
+// the ephemeral range (20000–29999), which NIP-compliant relays drop instead of
+// storing — that is why chat history vanished on reload / user switch.
+export const CHAT_KIND = 9233;
 export type ChatScope = "dm" | "group";
 
 export function scopeFor(type: "channel" | "direct"): ChatScope {
@@ -24,7 +28,7 @@ export function fanoutRecipients(memberNpubs: string[], meNpub: string): string[
   return Array.from(new Set([...memberNpubs, meNpub]));
 }
 
-/** kind-23333 template matching relaychat.rs: tags t(chatId)/p(recipient)/chat(scope). */
+/** kind-9233 template matching relaychat.rs: tags t(chatId)/p(recipient)/chat(scope). */
 export function buildChatEventTemplate(
   chatId: string,
   scope: ChatScope,
@@ -77,7 +81,7 @@ export class NostrChatClient {
     this.meHex = pubHexFromNpub(meNpub);
   }
 
-  /** Fan-out: encrypt + sign + publish one kind-23333 event per recipient (incl self).
+  /** Fan-out: encrypt + sign + publish one kind-9233 event per recipient (incl self).
    * Skips unreachable recipients with a console.warn; throws only if every recipient fails. */
   async publish(chatId: string, scope: ChatScope, memberNpubs: string[], text: string): Promise<void> {
     const createdAt = Math.floor(Date.now() / 1000);

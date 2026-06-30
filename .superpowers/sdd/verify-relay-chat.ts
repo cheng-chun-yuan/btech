@@ -4,7 +4,7 @@ import { SimplePool, generateSecretKey, getPublicKey, nip19, finalizeEvent, type
 import { getConversationKey, encrypt, decrypt } from "nostr-tools/nip44";
 
 const RELAY = process.env.NEXT_PUBLIC_NOSTR_RELAY ?? "ws://127.0.0.1:7777";
-const KIND = 23333;
+const KIND = 9233; // relay-stored (regular) kind; must match CHAT_KIND in nostr-chat.ts
 const CHAT = `verify-${Math.floor(Date.now())}`; // unique topic per run
 
 type P = { sk: Uint8Array; hex: string; npub: string };
