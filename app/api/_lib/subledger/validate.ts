@@ -14,6 +14,7 @@ const ON_CHAIN_TYPES = new Set<EventType>([
   "OFFRAMP",
   "ONRAMP",
   "GAS",
+  "INTERNAL_TRANSFER",
 ]);
 
 /** Events that settle a monetary AR/AP — an invoice_no is mandatory. */

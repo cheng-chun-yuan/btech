@@ -342,6 +342,57 @@ function gas(db: DB, ev: SubledgerEvent): { lines: JournalLine[] } {
 }
 
 /**
+ * INTERNAL_TRANSFER: a move between the company's own wallets (same beneficial
+ * owner). Under IAS 38 you keep control, so it is NOT a disposal — the principal
+ * is not derecognized and its lot basis + acquisition date are preserved. The
+ * only real economic effect is the on-chain miner fee, which IS a disposal of
+ * that fee quantity at fair value (booked exactly like GAS). With no fee it is a
+ * no-op (invisible at the entity-pool level). Internal vs external is declared by
+ * the event type here (approach A); a destination-address registry can infer it
+ * automatically later (approach B).
+ */
+function internalTransfer(db: DB, ev: SubledgerEvent): { lines: JournalLine[] } {
+  const fee = ev.fee_gas;
+  if (!fee || Number(fee) <= 0) return { lines: [] }; // principal move only -> no entry
+  const date = dateOf(ev.timestamp);
+  const price = getPrice(db, ev.asset, date);
+  if (!price) {
+    throw new Error(`INTERNAL_TRANSFER: no PricePoint to value gas (${ev.asset} ${date})`);
+  }
+  const scale = QTY_SCALE[ev.asset];
+  const fvFee = valueTwd(
+    parseDecimal(fee, scale),
+    scale,
+    parseDecimal(price.price_usd, PRICE_SCALE),
+    parseDecimal(price.usd_twd_rate, FX_SCALE),
+  );
+  // consume ONLY the fee quantity from lots; the principal (ev.qty) is untouched
+  const { gross_twd, impairment_twd } = consumeLots(db, {
+    disposal_event_id: ev.event_id,
+    wallet_id: ev.wallet_id,
+    asset: ev.asset,
+    qty: fee,
+    cost_flow: classify(db, ev.asset).cost_flow,
+  });
+
+  const toP = (v: Minor) => rescale(v, TWD_INTERNAL_SCALE, TWD_POSTING_SCALE);
+  const fvP = toP(fvFee);
+  const grossP = toP(gross_twd);
+  const impairmentP = toP(impairment_twd);
+  const deltaP = fvP - (grossP - impairmentP);
+  const tx = ev.tx_hash ?? null;
+
+  const lines: JournalLine[] = [
+    { dr_cr: "DR", account: "fee_expense", amount_twd: fmtP(fvP), tx_hash: tx, memo: "internal_transfer_gas" },
+    { dr_cr: "CR", account: "digital_asset", amount_twd: fmtP(grossP), asset: ev.asset, qty: fee, tx_hash: tx },
+  ];
+  if (impairmentP > ZERO) lines.push({ dr_cr: "DR", account: "accum_impairment", amount_twd: fmtP(impairmentP), asset: ev.asset, tx_hash: tx });
+  if (deltaP > ZERO) lines.push({ dr_cr: "CR", account: "disposal_gain", amount_twd: fmtP(deltaP), tx_hash: tx, memo: "disposal_leg" });
+  else if (deltaP < ZERO) lines.push({ dr_cr: "DR", account: "disposal_loss", amount_twd: fmtP(-deltaP), tx_hash: tx, memo: "disposal_leg" });
+  return { lines };
+}
+
+/**
  * RECEIVE_SETTLE_AR (§6/§7): a USD AR is settled by crypto received. Symmetric to
  * PAY_SUPPLIER. fx_leg revalues the (monetary) AR to the settlement rate; the
  * crypto received opens a new lot at fair value; the residual between that FV and
@@ -405,6 +456,7 @@ const BUILDERS: Partial<Record<SubledgerEvent["type"], Builder>> = {
   SELL: dispose,
   OFFRAMP: dispose,
   GAS: gas,
+  INTERNAL_TRANSFER: internalTransfer,
   RECEIVE_NONCASH: receiveNoncash,
   PAY_SUPPLIER: paySupplier,
   RECEIVE_SETTLE_AR: receiveSettleAr,

@@ -15,6 +15,7 @@ export type EventType =
   | "BUY"
   | "SELL"
   | "GAS"
+  | "INTERNAL_TRANSFER"
   | "PERIODEND_REVALUE";
 
 /** Inbound event (decimals as strings). One per settlement/chain/custody fact. */
