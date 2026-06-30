@@ -31,6 +31,9 @@ export type ChatMessage = {
   text: string;
   signed: boolean;
   zaps: string;
+  /** Nostr pubkey (npub) of the author. Present once plumbed from the server;
+   * used to open a DM with the sender. */
+  authorNpub?: string;
 };
 
 export type ChatType = "channel" | "direct";
@@ -56,6 +59,9 @@ export type Chat = {
   vaultStatus?: "pending" | "active";
   /** Real Taproot receive address (set once the vault is provisioned). */
   receiveAddress?: string;
+  /** For a `direct` chat: the other participant's npub (the member that is not
+   * the current viewer). Used to derive the NIP-44 conversation key. */
+  counterpartyNpub?: string;
   /** Real group x-only public key (live vault only). */
   groupKey?: string;
   tiers: Tier[];

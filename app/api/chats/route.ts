@@ -6,6 +6,8 @@ import { getDb } from "../_lib/db";
 import { getSessionUser, SESSION_COOKIE } from "../_lib/auth";
 import { addMember, recordAudit } from "../_lib/audit";
 import { runDemo } from "../_lib/btech";
+import { isChatMember, directCounterparty, resolveIdentity } from "../_lib/dm";
+import { initialsFor, colorForNpub } from "../_lib/avatar";
 import type { Chat, ChatMessage } from "../../ui/wallet/types";
 
 export const runtime = "nodejs";
@@ -16,7 +18,7 @@ export async function GET() {
   const chatRows = db.prepare("SELECT id, data_json FROM chats").all() as
     { id: string; data_json: string }[];
   const msgStmt = db.prepare(
-    "SELECT id, who, handle, initials, color, time, text, signed, zaps FROM messages WHERE chat_id = ? ORDER BY created_at",
+    "SELECT id, who, handle, initials, color, time, text, signed, zaps, author_npub AS authorNpub FROM messages WHERE chat_id = ? ORDER BY created_at",
   );
   const chats: Chat[] = chatRows.map((row) => {
     const meta = JSON.parse(row.data_json) as Omit<Chat, "messages">;
@@ -50,7 +52,26 @@ export async function GET() {
     );
   }
 
-  return NextResponse.json({ chats });
+  // Resolve the viewer so we can hide DMs they're not in and label each DM with
+  // the *other* participant (the stored name is from the creator's POV).
+  const viewer = getSessionUser(db, (await cookies()).get(SESSION_COOKIE)?.value);
+  const visible = chats.filter(
+    (c) => c.type !== "direct" || (viewer != null && isChatMember(db, c.id, viewer.npub)),
+  );
+  if (viewer) {
+    for (const c of visible) {
+      if (c.type !== "direct") continue;
+      const other = directCounterparty(db, c.id, viewer.npub);
+      if (!other) continue;
+      const { label } = resolveIdentity(db, other);
+      c.counterpartyNpub = other;
+      c.name = label;
+      c.initials = initialsFor(label);
+      c.color = colorForNpub(other);
+    }
+  }
+
+  return NextResponse.json({ chats: visible });
 }
 
 /** Create a channel (group vault) and provision a real receive address. */
