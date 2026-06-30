@@ -17,7 +17,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use btech::{DemoReport, SettlementReport, SettlementRequest, VaultKeyMaterial, WalletApp};
+use btech::{DemoReport, HtssNoncePackage, SettlementReport, SettlementRequest, VaultKeyMaterial, WalletApp};
 
 struct AppState {
     vaults: Mutex<HashMap<String, WalletApp>>,
@@ -31,6 +31,23 @@ struct VaultQuery {
 
 #[derive(Deserialize)]
 struct SignReq {
+    recipient: String,
+    #[serde(rename = "amountSats")]
+    amount_sats: u64,
+    nonce: String,
+    memo: String,
+}
+
+#[derive(Deserialize)]
+struct PrecommitReq {
+    session: String,
+    participant_id: u16,
+}
+
+#[derive(Deserialize)]
+struct FinalizeReq {
+    session: String,
+    signer_set: Vec<u16>,
     recipient: String,
     #[serde(rename = "amountSats")]
     amount_sats: u64,
@@ -128,6 +145,43 @@ async fn vault_sign(
     Ok(Json(report))
 }
 
+async fn vault_sign_precommit(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<VaultQuery>,
+    Json(req): Json<PrecommitReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let id = q.id.unwrap_or_else(|| "treasury".to_string());
+    let package: HtssNoncePackage = with_vault(&state, &id, |app| {
+        app.htss_precommit(&req.session, req.participant_id)
+    })
+    .map_err(err500)?;
+    let nonce_package = serde_json::to_value(&package).map_err(|e| err500(e.into()))?;
+    Ok(Json(serde_json::json!({
+        "participant_id": req.participant_id,
+        "nonce_package": nonce_package,
+    })))
+}
+
+async fn vault_sign_finalize(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<VaultQuery>,
+    Json(req): Json<FinalizeReq>,
+) -> Result<Json<DemoReport>, (StatusCode, String)> {
+    let id = q.id.unwrap_or_else(|| "treasury".to_string());
+    let report = with_vault(&state, &id, |app| {
+        app.htss_finalize(
+            &req.session,
+            &req.nonce,
+            &req.recipient,
+            req.amount_sats,
+            &req.memo,
+            req.signer_set.clone(),
+        )
+    })
+    .map_err(err500)?;
+    Ok(Json(report))
+}
+
 /// Build, sign, and return a broadcastable Taproot key-path spend out of the
 /// vault. The caller broadcasts the returned raw transaction.
 async fn vault_settle(
@@ -157,6 +211,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(healthz))
         .route("/vault/state", get(vault_state))
         .route("/vault/sign", post(vault_sign))
+        .route("/vault/sign/precommit", post(vault_sign_precommit))
+        .route("/vault/sign/finalize", post(vault_sign_finalize))
         .route("/vault/settle", post(vault_settle))
         .with_state(state);
 
