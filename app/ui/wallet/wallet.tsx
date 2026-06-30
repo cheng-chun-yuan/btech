@@ -12,9 +12,12 @@ import { ProfilePopover } from "./profile-popover";
 import { resolveSigner, type NostrSigner } from "./nostr-signer";
 import { NostrChatClient, relayUrl, scopeFor, type DecryptedMessage } from "./nostr-chat";
 import { mergeNewChats } from "./chat-merge";
+import { PolicyEditor } from "./policy-editor";
 import type {
   Approval,
   Chat,
+  PolicyConfig,
+  PolicyDiffItem,
   SignerKey,
   Tier,
   WalletState,
@@ -66,6 +69,31 @@ function quorumOf(tiers: Tier[]): string {
 }
 function spendOf(tiers: Tier[]): string {
   return "spend = " + tiers.map((t) => `(${clampNeed(t)} of ${t.keys.length} ${t.short})`).join("  AND  ");
+}
+
+/** Map the display `tiers` of a chat to the editable `PolicyConfig` the
+ * PolicyEditor works on. Each tier becomes a rank (0,1,2…). A display `SignerKey`
+ * carries no npub, so we derive the Rust signer id by parsing `k.id` ("k1"→1,
+ * "k0-2"→0) and look the npub up from the vault roster by that id; falling back to
+ * the slot index + 1 and an empty npub when neither is available. */
+function chatToPolicyConfig(
+  chat: Chat,
+  roster: { npub: string; label: string; participantId: number }[],
+): PolicyConfig {
+  const byPid = new Map(roster.map((r) => [r.participantId, r]));
+  return {
+    tiers: chat.tiers.map((t, i) => ({
+      id: t.id,
+      name: t.name,
+      rank: i,
+      required: clampNeed(t),
+      signers: t.keys.map((k, j) => {
+        const pid = Number.parseInt(k.id.replace(/\D/g, ""), 10) || j + 1;
+        const r = byPid.get(pid);
+        return { participantId: pid, npub: r?.npub ?? "", label: k.name, rank: i };
+      }),
+    })),
+  };
 }
 function statusLabelOf(k: SignerKey): string {
   if (k.statusText) return k.statusText;
@@ -651,6 +679,61 @@ export default function Wallet() {
       ...prev,
     ]);
   };
+  // Persisted policy-change propose flow (mirrors submitSend): POST a kind:"role"
+  // approval carrying the full proposedPolicy + diff, then announce in chat. We do
+  // NOT send a signerSet and do NOT trust the threshold — the server pins it to the
+  // current quorum (see app/api/approvals/route.ts), so a proposer can't self-ratify.
+  const proposePolicyChange = (chatId: string) => (draft: PolicyConfig, diff: PolicyDiffItem[]) => {
+    const chat = chats.find((c) => c.id === chatId);
+    if (!chat) return;
+    const policy = chat.tiers.map((t) => `${clampNeed(t)}/${t.keys.length}`).join(" + ");
+    const threshold = chat.tiers.reduce((a, t) => a + clampNeed(t), 0);
+    const proposal: Approval = {
+      id: `rc${Date.now()}`,
+      kind: "role",
+      title: `Policy change · ${chat.name}`,
+      changeLabel: diff.map((d) => d.text).join("  ·  "),
+      detail: `Proposed in ${chat.name}`,
+      requestedBy: "You",
+      vault: chat.name,
+      time: "just now",
+      policy,
+      threshold,
+      total: threshold,
+      signed: 0,
+      youSigned: false,
+      status: "pending",
+      live: !!chat.receiveAddress,
+      proposedPolicy: draft,
+      policyDiff: diff,
+    };
+    const announce = `Proposed a policy change — ${diff.map((d) => d.text).join(", ")}. Needs the current ${policy} quorum to ratify.`;
+    void (async () => {
+      const res = await fetch("/api/approvals", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(proposal),
+      });
+      if (!res.ok) {
+        setStateError(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "Proposal failed");
+        return;
+      }
+      const created = ((await res.json()) as { approval: Approval }).approval;
+      setApprovals((prev) => [created, ...prev]);
+      const relayClient = chatClientRef.current;
+      if (relayClient) {
+        const memberNpubs = members.map((m) => m.npub);
+        if (memberNpubs.filter((n) => n !== me?.npub).length > 0) {
+          try {
+            await relayClient.publish(chatId, scopeFor(chat.type), memberNpubs, announce);
+          } catch {
+            // best-effort; the approval was already created
+          }
+        }
+      }
+      void fetch(`/api/chats/${chatId}/audit`, { method: "POST" }).then(() => refreshAudit(chatId));
+    })();
+  };
 
   // ---- chat messaging ----
   const sendMsg = () => {
@@ -928,6 +1011,7 @@ export default function Wallet() {
               setThreshold={setThreshold}
               removeKey={removeKey}
               proposeKey={proposeKey}
+              proposePolicy={proposePolicyChange}
               onAuthorClick={(m) =>
                 m.npub &&
                 setPopover({ npub: m.npub, name: m.name, initials: m.initials, color: m.color })
@@ -1416,6 +1500,7 @@ function ChatDetail({
   setThreshold,
   removeKey,
   proposeKey,
+  proposePolicy,
   onAuthorClick,
   members,
   onMemberClick,
@@ -1446,6 +1531,7 @@ function ChatDetail({
   setThreshold: (chatId: string, tierId: string, delta: number) => () => void;
   removeKey: (chatId: string, tierId: string, keyId: string) => () => void;
   proposeKey: (chatId: string, tierId: string) => () => void;
+  proposePolicy: (chatId: string) => (draft: PolicyConfig, diff: PolicyDiffItem[]) => void;
   onAuthorClick: (a: { npub: string; name: string; initials: string; color: string; role?: string }) => void;
   members: { npub: string; label: string; role: string; initials: string; color: string }[];
   onMemberClick: (m: { npub: string; label: string; role: string; initials: string; color: string }) => void;
@@ -1633,7 +1719,14 @@ function ChatDetail({
         </div>
 
         {showVault && hasVault && (
-          <VaultPanel chat={chat} setThreshold={setThreshold} removeKey={removeKey} proposeKey={proposeKey} />
+          <VaultPanel
+            chat={chat}
+            setThreshold={setThreshold}
+            removeKey={removeKey}
+            proposeKey={proposeKey}
+            roster={personas.map((p) => ({ npub: p.npub, label: p.label, participantId: p.participant_id }))}
+            onProposePolicy={proposePolicy}
+          />
         )}
         {!isDirect && (
           <div style={{ flex: "0 0 296px", display: "flex", flexDirection: "column", gap: 14, minHeight: 0 }}>
@@ -1959,11 +2052,15 @@ function VaultPanel({
   setThreshold,
   removeKey,
   proposeKey,
+  roster,
+  onProposePolicy,
 }: {
   chat: Chat;
   setThreshold: (chatId: string, tierId: string, delta: number) => () => void;
   removeKey: (chatId: string, tierId: string, keyId: string) => () => void;
   proposeKey: (chatId: string, tierId: string) => () => void;
+  roster: { npub: string; label: string; participantId: number }[];
+  onProposePolicy: (chatId: string) => (draft: PolicyConfig, diff: PolicyDiffItem[]) => void;
 }) {
   const quorum = quorumOf(chat.tiers);
   const multiTier = chat.tiers.length > 1;
@@ -2019,6 +2116,14 @@ function VaultPanel({
           <div style={{ fontSize: 11, color: C.sand, marginTop: 3 }}>required from each tier · quorums never overlap</div>
         </div>
         <div style={{ fontSize: 11, color: C.faint2, lineHeight: 1.5 }}>Adding or removing a signer is proposed and ratified by the group in this chat — there is no fixed rulebook.</div>
+        <div style={{ borderTop: `1px solid ${C.line}`, paddingTop: 16 }}>
+          <div style={{ fontSize: 11, color: C.sand, letterSpacing: ".4px", marginBottom: 12 }}>PROPOSE A POLICY CHANGE</div>
+          <PolicyEditor
+            current={chatToPolicyConfig(chat, roster)}
+            roster={roster}
+            onPropose={onProposePolicy(chat.id)}
+          />
+        </div>
       </div>
     </div>
   );

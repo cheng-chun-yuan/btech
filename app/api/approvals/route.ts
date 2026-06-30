@@ -76,8 +76,9 @@ export async function POST(request: Request) {
   } as Approval;
 
   // Policy-change proposals (kind:"role" + proposedPolicy): hard-block a bricked
-  // policy (would freeze the vault forever) and stamp the basePolicyVersion the
-  // proposal was authored against (a lost-update guard checked later at apply).
+  // policy (would freeze the vault forever), stamp the basePolicyVersion the
+  // proposal was authored against (a lost-update guard checked later at apply),
+  // and SERVER-SIDE pin the threshold to the CURRENT policy's full quorum.
   if (approval.kind === "role" && approval.proposedPolicy) {
     if (isBrickedPolicy(approval.proposedPolicy)) {
       return NextResponse.json(
@@ -89,9 +90,22 @@ export async function POST(request: Request) {
     const chatRow = db.prepare("SELECT data_json FROM chats WHERE id = ?").get(chatId) as
       | { data_json: string }
       | undefined;
-    approval.basePolicyVersion = chatRow
-      ? (JSON.parse(chatRow.data_json).policyVersion ?? 0)
-      : 0;
+    const meta = chatRow
+      ? (JSON.parse(chatRow.data_json) as { policyVersion?: number; tiers?: { minNeed?: number }[] })
+      : undefined;
+    approval.basePolicyVersion = meta?.policyVersion ?? 0;
+
+    // SECURITY: a policy-change approval must be ratified by the vault's CURRENT
+    // quorum — never by a proposer-picked signerSet. C's signerSet resolution above
+    // would (for a role approval) leave a default signerSet and set
+    // threshold = signerSet.length, which is a current-quorum bypass (a proposer
+    // could land threshold = 1 and self-ratify the reshare). Drop any signerSet and
+    // pin the threshold to the sum of the current policy tiers' minNeed. The client
+    // threshold is NOT trusted here; we only fall back to it when there is no policy.
+    delete approval.signerSet;
+    const quorum = (meta?.tiers ?? []).reduce((sum, t) => sum + (t.minNeed ?? 0), 0);
+    approval.threshold = quorum > 0 ? quorum : (body.threshold ?? 1);
+    approval.total = approval.threshold;
   }
 
   db.prepare(`
