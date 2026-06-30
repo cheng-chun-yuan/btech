@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
+import { finalizeEvent } from "nostr-tools";
+import type { EventTemplate } from "nostr-tools";
 
 import { ApprovalCard } from "./approval-card";
 import { buildLiveVault } from "./data";
@@ -97,6 +99,34 @@ function relTime(unixSec: number | null): string {
   return `${Math.floor(diff / 86_400)}d ago`;
 }
 
+// Demo persona switching. The login screen logs a persona in with one tap by
+// signing the challenge with a deterministic per-participant secret; we reuse
+// the exact same path from the sidebar so the demo can hop between signers
+// without re-entering a key. Real users still bring their own NIP-07/nsec.
+type Persona = { npub: string; label: string; role: string; participant_id: number };
+
+function challengeTemplate(nonce: string): EventTemplate {
+  return {
+    kind: 27235,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [["challenge", nonce]],
+    content: `btech-login:${nonce}`,
+  };
+}
+
+/** Same deterministic secret the server derives for a demo persona. */
+async function personaSecret(participantId: number): Promise<Uint8Array> {
+  const data = new TextEncoder().encode(`btech-signer-v1:${participantId}`);
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+}
+
+function initialsOf(label: string): string {
+  const parts = label.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
 export default function Wallet() {
   const [view, setView] = useState<View>("overview");
   const [activeChat, setActiveChat] = useState<string | null>(null);
@@ -112,6 +142,7 @@ export default function Wallet() {
   const [stateError, setStateError] = useState<string | null>(null);
   const [signingId, setSigningId] = useState<string | null>(null);
   const [me, setMe] = useState<{ npub: string; label: string; participant_id: number | null } | null>(null);
+  const [personas, setPersonas] = useState<Persona[]>([]);
   const [audit, setAudit] = useState<{ entries?: AuditEntryUI[]; restricted?: boolean }>({});
   const [chainTip, setChainTip] = useState<number | null>(null);
   const [activity, setActivity] = useState<ActivityRow[] | null>(null);
@@ -191,6 +222,32 @@ export default function Wallet() {
   const onLogout = useCallback(async () => {
     await fetch("/api/auth/logout", { method: "POST" });
     window.location.href = "/login";
+  }, []);
+
+  // Demo signer roster for the sidebar switcher (empty if the backend is offline).
+  useEffect(() => {
+    fetch("/api/auth/personas")
+      .then((r) => r.json())
+      .then((d) => setPersonas((d.personas ?? []) as Persona[]))
+      .catch(() => setPersonas([]));
+  }, []);
+
+  // One-tap switch to another demo persona: sign a fresh challenge with that
+  // signer's deterministic secret, swap the session cookie, reload as them.
+  const onSwitchPersona = useCallback(async (participantId: number) => {
+    try {
+      const { nonce } = (await (await fetch("/api/auth/challenge")).json()) as { nonce: string };
+      const event = finalizeEvent(challengeTemplate(nonce), await personaSecret(participantId));
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ event, nonce }),
+      });
+      if (!res.ok) throw new Error(((await res.json()) as { error?: string }).error ?? "Switch failed");
+      window.location.href = "/";
+    } catch (e) {
+      setStateError(e instanceof Error ? e.message : "Switch failed");
+    }
   }, []);
 
   // A 401 from an authenticated route means the session cookie is stale: it's
@@ -594,6 +651,10 @@ export default function Wallet() {
         openChat={openChat}
         goPlan={go("plan")}
         onCreateChannel={onCreateChannel}
+        me={me}
+        personas={personas}
+        onSwitchPersona={onSwitchPersona}
+        onLogout={onLogout}
       />
 
       <main style={{ flex: 1, height: "100%", display: "flex", flexDirection: "column", minWidth: 0 }}>
@@ -714,6 +775,10 @@ function Sidebar({
   openChat,
   goPlan,
   onCreateChannel,
+  me,
+  personas,
+  onSwitchPersona,
+  onLogout,
 }: {
   view: View;
   active: Chat | null;
@@ -723,7 +788,12 @@ function Sidebar({
   openChat: (id: string) => () => void;
   goPlan: () => void;
   onCreateChannel: () => void;
+  me: { npub: string; label: string; participant_id: number | null } | null;
+  personas: Persona[];
+  onSwitchPersona: (participantId: number) => void;
+  onLogout: () => void;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   const nav = [
     { key: "overview" as const, label: "Overview", icon: "◉", badge: "" },
     { key: "approvals" as const, label: "Approvals", icon: "✎", badge: youNeed ? String(youNeed) : "" },
@@ -801,13 +871,67 @@ function Sidebar({
           <div style={{ fontSize: 11, color: C.sand, letterSpacing: ".3px", marginBottom: 6 }}>SELF-CUSTODY</div>
           <div style={{ fontSize: 12.5, color: "#C5C9CE", lineHeight: 1.45 }}>No keys held by BTech. Your quorum, your coins.</div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 8px 4px", borderTop: `1px solid ${C.line}` }}>
-          <div style={{ width: 30, height: 30, borderRadius: 8, background: "#23262B", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 600, color: C.muted }}>DK</div>
-          <div style={{ lineHeight: 1.15, flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>Dana Klein</div>
-            <div style={{ fontSize: 11, color: C.faint }}>Business plan</div>
+        <div style={{ position: "relative", borderTop: `1px solid ${C.line}`, paddingTop: 11 }}>
+          {menuOpen && (
+            <>
+              <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 30 }} />
+              <div style={{ position: "absolute", bottom: "calc(100% + 6px)", left: 0, right: 0, zIndex: 31, background: C.surface2, border: `1px solid ${C.line2}`, borderRadius: 12, padding: 6, boxShadow: "0 14px 36px rgba(0,0,0,.55)" }}>
+                <div style={{ fontSize: 10, color: C.faint, letterSpacing: ".4px", padding: "6px 8px 5px" }}>SWITCH SIGNER · DEMO</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 248, overflowY: "auto" }}>
+                  {personas.length === 0 && (
+                    <div style={{ fontSize: 11.5, color: C.faint, padding: "6px 8px" }}>No demo signers loaded.</div>
+                  )}
+                  {personas.map((p) => {
+                    const current = me?.npub === p.npub;
+                    return (
+                      <button
+                        key={p.npub}
+                        onClick={() => {
+                          setMenuOpen(false);
+                          if (!current) void onSwitchPersona(p.participant_id);
+                        }}
+                        style={{ display: "flex", alignItems: "center", gap: 9, width: "100%", border: "none", background: current ? C.orangeSoft : "transparent", borderRadius: 8, padding: "7px 8px", cursor: current ? "default" : "pointer", fontFamily: "inherit", textAlign: "left", color: C.ink }}
+                      >
+                        <span style={{ width: 22, height: 22, flex: "0 0 22px", borderRadius: 6, background: current ? C.orange : "#23262B", color: current ? C.bg : C.muted, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9.5, fontWeight: 700 }}>{initialsOf(p.label)}</span>
+                        <span style={{ flex: 1, minWidth: 0, lineHeight: 1.2 }}>
+                          <span style={{ display: "block", fontSize: 12.5, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.label}</span>
+                          <span style={{ display: "block", fontSize: 10.5, color: C.faint }}>{p.role} · #{p.participant_id}</span>
+                        </span>
+                        {current && <span style={{ flex: "0 0 auto", fontSize: 9, color: C.orange }}>● now</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void onLogout();
+                  }}
+                  style={{ width: "100%", marginTop: 4, border: "none", borderTop: `1px solid ${C.line2}`, background: "transparent", color: C.faint2, fontSize: 11.5, fontFamily: "inherit", padding: "9px 8px 5px", textAlign: "left", cursor: "pointer" }}
+                >
+                  Sign out
+                </button>
+              </div>
+            </>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 8px 4px" }}>
+            <button
+              onClick={() => setMenuOpen((o) => !o)}
+              disabled={!me}
+              title="Switch signer"
+              style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 10, border: "none", background: "transparent", padding: 0, cursor: me ? "pointer" : "default", fontFamily: "inherit", textAlign: "left", color: C.ink }}
+            >
+              <div style={{ width: 30, height: 30, flex: "0 0 30px", borderRadius: 8, background: "#23262B", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 600, color: C.muted }}>{me ? initialsOf(me.label) : "…"}</div>
+              <div style={{ lineHeight: 1.15, flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{me?.label ?? "Signing in…"}</div>
+                <div style={{ fontSize: 11, color: C.faint }}>
+                  {me ? (me.participant_id != null ? `Signer #${me.participant_id} · switch` : "Observer · switch") : ""}
+                </div>
+              </div>
+              <span style={{ flex: "0 0 auto", color: C.faint, fontSize: 9, transform: menuOpen ? "rotate(180deg)" : "none", transition: "transform 150ms ease" }}>▲</span>
+            </button>
+            <button onClick={goPlan} style={{ flex: "0 0 auto", background: C.orangeSoft, border: "1px solid rgba(247,147,26,.32)", color: C.orange, fontSize: 11, fontWeight: 600, fontFamily: "inherit", padding: "6px 11px", borderRadius: 8, cursor: "pointer" }}>Upgrade</button>
           </div>
-          <button onClick={goPlan} style={{ flex: "0 0 auto", background: C.orangeSoft, border: "1px solid rgba(247,147,26,.32)", color: C.orange, fontSize: 11, fontWeight: 600, fontFamily: "inherit", padding: "6px 11px", borderRadius: 8, cursor: "pointer" }}>Upgrade</button>
         </div>
       </div>
     </aside>
