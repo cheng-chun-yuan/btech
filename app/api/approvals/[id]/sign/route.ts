@@ -60,7 +60,7 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
   // they approve. The secret nonce stays in vaultd; we store only the public
   // package. Falls through to a plain vote when vaultd/ signerSet is absent.
   let precommitJson: string | null = null;
-  if (live && approval.signerSet && VAULTD_CONFIGURED) {
+  if (live && approval.signerSet && VAULTD_CONFIGURED && !approval.proof?.verified) {
     try {
       const pc = await runPrecommit(
         { session: approval.id, participantId: signer.participant_id },

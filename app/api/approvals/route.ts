@@ -41,11 +41,11 @@ export async function POST(request: Request) {
 
   // Propose-picks-signers: the proposer may send explicit `signerNpubs`; else we
   // default to the vault's canonical valid set (when it has a signer roster).
-  let signerSet = body.signerSet;
+  let signerSet: Approval["signerSet"];   // undefined unless we resolve one server-side
   try {
     if (Array.isArray((body as { signerNpubs?: string[] }).signerNpubs)) {
       signerSet = resolveSignerSet(db, (body as { signerNpubs: string[] }).signerNpubs);
-    } else if (!signerSet) {
+    } else {
       const def = defaultSignerSet(db);
       if (def.length > 0) signerSet = def;
     }
