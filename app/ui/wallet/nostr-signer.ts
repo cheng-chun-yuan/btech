@@ -1,4 +1,4 @@
-import { nip19 } from "nostr-tools";
+import { nip19, finalizeEvent } from "nostr-tools";
 import type { Event, EventTemplate } from "nostr-tools";
 import { getConversationKey, encrypt, decrypt } from "nostr-tools/nip44";
 
@@ -18,6 +18,7 @@ declare global {
 export interface NostrSigner {
   encrypt(counterpartyNpub: string, plaintext: string): Promise<string>;
   decrypt(counterpartyNpub: string, ciphertext: string): Promise<string>;
+  signEvent(template: EventTemplate): Promise<Event>;
 }
 
 function pubHexFromNpub(npub: string): string {
@@ -38,6 +39,9 @@ export class LocalKeySigner implements NostrSigner {
   async decrypt(counterpartyNpub: string, ciphertext: string): Promise<string> {
     return decrypt(ciphertext, this.convKey(counterpartyNpub));
   }
+  async signEvent(template: EventTemplate): Promise<Event> {
+    return finalizeEvent(template, this.secretKey);
+  }
 }
 
 /** Encrypt/decrypt via a NIP-07 browser extension that supports nip44. */
@@ -49,6 +53,10 @@ export class Nip07Signer implements NostrSigner {
   async decrypt(counterpartyNpub: string, ciphertext: string): Promise<string> {
     if (!window.nostr?.nip44) throw new Error("NIP-07 extension lacks nip44 support");
     return window.nostr.nip44.decrypt(pubHexFromNpub(counterpartyNpub), ciphertext);
+  }
+  async signEvent(template: EventTemplate): Promise<Event> {
+    if (!window.nostr) throw new Error("No NIP-07 extension");
+    return window.nostr.signEvent(template);
   }
 }
 

@@ -38,6 +38,12 @@ describe("db", () => {
     expect(msgs.c).toBeGreaterThan(0);
   });
 
+  it("approval_signatures has a precommit column", () => {
+    const db = openTestDb();
+    const cols = (db.prepare("PRAGMA table_info(approval_signatures)").all() as { name: string }[]).map((c) => c.name);
+    expect(cols).toContain("precommit");
+  });
+
   it("getDb() provisions the subledger sl_* schema in the app database", () => {
     const tmp = path.join(os.tmpdir(), `btech-sl-test-${process.pid}.db`);
     // force a fresh, file-backed db (getDb caches on globalThis)

@@ -158,6 +158,53 @@ export async function runSignApproval(
   ]) as Promise<DemoReport>;
 }
 
+/** True when btech-vaultd is configured (enables the collapsed two-round). */
+export const VAULTD_CONFIGURED = !!VAULTD_URL;
+
+export type PrecommitResult = { participant_id: number; nonce_package: unknown };
+
+/** Round 1: pre-commit one signer's nonce for `session`. Returns the public
+ * nonce package (store it for audit; the secret nonce stays in vaultd). */
+export async function runPrecommit(
+  p: { session: string; participantId: number },
+  vaultId = "treasury",
+): Promise<PrecommitResult> {
+  if (!VAULTD_URL) throw new Error("BTECH_VAULTD_URL is required for pre-commit");
+  const res = await fetch(`${VAULTD_URL}/vault/sign/precommit?id=${encodeURIComponent(vaultId)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ session: p.session, participant_id: p.participantId }),
+  });
+  if (!res.ok) {
+    throw new Error(`vaultd precommit failed: ${res.status} ${await res.text().catch(() => "")}`);
+  }
+  return (await res.json()) as PrecommitResult;
+}
+
+/** Round 2: finalize `session` once every chosen signer has pre-committed. */
+export async function runFinalize(
+  p: { session: string; signerSet: number[]; recipient: string; amountSats: number; nonce: string; memo: string },
+  vaultId = "treasury",
+): Promise<DemoReport> {
+  if (!VAULTD_URL) throw new Error("BTECH_VAULTD_URL is required for finalize");
+  const res = await fetch(`${VAULTD_URL}/vault/sign/finalize?id=${encodeURIComponent(vaultId)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      session: p.session,
+      signer_set: p.signerSet,
+      recipient: p.recipient,
+      amountSats: Math.max(0, Math.round(p.amountSats)),
+      nonce: p.nonce,
+      memo: p.memo,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`vaultd finalize failed: ${res.status} ${await res.text().catch(() => "")}`);
+  }
+  return (await res.json()) as DemoReport;
+}
+
 export type SettlementInput = { txid: string; vout: number; valueSats: number };
 
 export type SettlementReport = {

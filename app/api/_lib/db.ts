@@ -8,7 +8,7 @@ import { migrateSubledger, seedConfig } from "./subledger";
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 export function migrate(db: DB): void {
   db.pragma("journal_mode = WAL");
@@ -74,6 +74,7 @@ export function migrate(db: DB): void {
       approval_id TEXT NOT NULL,
       npub TEXT NOT NULL,
       aggregate_signature TEXT,
+      precommit TEXT,
       signed_at INTEGER NOT NULL,
       PRIMARY KEY (approval_id, npub)
     );
@@ -118,6 +119,11 @@ export function migrate(db: DB): void {
     // v7: approvals are user-created and stored in the DB, with no seeded or
     // hardcoded fixtures. Drop the seeded transfers + the old live fixture row.
     db.prepare("DELETE FROM approvals WHERE id IN ('tx1', 'tx2', 'tx3', 'rc2')").run();
+    // v8: per-signer pre-commit nonce package for the collapsed two-round flow.
+    const sigCols = (db.prepare("PRAGMA table_info(approval_signatures)").all() as { name: string }[]).map((c) => c.name);
+    if (!sigCols.includes("precommit")) {
+      db.prepare("ALTER TABLE approval_signatures ADD COLUMN precommit TEXT").run();
+    }
     db.prepare("UPDATE schema_meta SET version = ?").run(SCHEMA_VERSION);
   }
 }

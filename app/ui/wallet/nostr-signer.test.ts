@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { generateSecretKey, getPublicKey, nip19 } from "nostr-tools";
+import { generateSecretKey, getPublicKey, nip19, verifyEvent } from "nostr-tools";
 import { LocalKeySigner, personaSecret } from "./nostr-signer";
 
 describe("LocalKeySigner", () => {
@@ -31,5 +31,21 @@ describe("personaSecret", () => {
     expect(Buffer.from(await personaSecret(2)).toString("hex")).not.toBe(
       Buffer.from(a).toString("hex"),
     );
+  });
+});
+
+describe("LocalKeySigner.signEvent", () => {
+  it("produces a verifiable event whose pubkey matches the key", async () => {
+    const sk = generateSecretKey();
+    const signer = new LocalKeySigner(sk);
+    const ev = await signer.signEvent({
+      kind: 23333,
+      created_at: 1700000000,
+      tags: [["t", "chat1"], ["chat", "dm"]],
+      content: "hello",
+    });
+    expect(verifyEvent(ev)).toBe(true);
+    expect(ev.pubkey).toBe(getPublicKey(sk));
+    expect(ev.kind).toBe(23333);
   });
 });

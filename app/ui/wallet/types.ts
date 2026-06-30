@@ -62,6 +62,8 @@ export type Chat = {
   /** For a `direct` chat: the other participant's npub (the member that is not
    * the current viewer). Used to derive the NIP-44 conversation key. */
   counterpartyNpub?: string;
+  /** npubs of this chat's members (used to author-gate inbound relay messages). */
+  memberNpubs?: string[];
   /** Real group x-only public key (live vault only). */
   groupKey?: string;
   tiers: Tier[];
@@ -70,6 +72,10 @@ export type Chat = {
 
 export type ApprovalStatus = "pending" | "ready" | "broadcast" | "rejected";
 export type ApprovalKind = "send" | "role";
+
+/** One signer the proposer picked for an approval. Its participantId aligns
+ * with the Rust signer_set and the `signers` table; npub gates who may sign. */
+export type SelectedSigner = { participantId: number; npub: string; label: string };
 
 export type Approval = {
   id: string;
@@ -91,6 +97,9 @@ export type Approval = {
   policy: string;
   threshold: number;
   total: number;
+  /** The exact signers the proposer assembled. Length is the threshold; all
+   * must sign. Absent on legacy/no-roster approvals (existing flow applies). */
+  signerSet?: SelectedSigner[];
   signed: number;
   youSigned: boolean;
   status: ApprovalStatus;
