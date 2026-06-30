@@ -1,26 +1,29 @@
 /**
- * silentpayment/crypto.ts — BIP-352-style silent payments for Arkade VTXOs.
+ * silentpayment/crypto.ts — BIP-352 silent payments, shared by Bitcoin L1 and
+ * Arkade VTXOs.
  *
- * Off-chain adaptation of BIP-352: the replay nonce is the spent VTXO's canonical
- * `vtxoId` (uniqueness enforced by the operator's single-spend rule) instead of an
- * on-chain outpoint, and the per-output counter `t` is the leaf index inside the
- * funding vtx. Inputs are aggregated (BIP-352 multi-input): single-input is n=1.
+ * Byte-compatible with BIP-352 (tagged hashes, outpoint serialization, `sp1`
+ * bech32m addresses) — validated against the official test vectors — so ONE
+ * published address receives silent payments on either rail. The only thing that
+ * differs by venue is where the input outpoint comes from:
+ *   - L1:     the spent UTXO's outpoint   (uniqueness from the blockchain)
+ *   - Arkade: the spent VTXO's outpoint   (uniqueness from the operator's single-spend)
  *
- *   A_sum      = Σ Aᵢ
- *   input_hash = H( min(vtxoId) ‖ A_sum )
+ *   input_hash = H_tag("BIP0352/Inputs",       outpoint_smallest ‖ A_sum)
  *   ecdh       = input_hash · a_sum · B_scan   (sender)
  *              = input_hash · b_scan · A_sum    (scanner / recipient)
- *   P          = B_spend + H( ecdh ‖ t ) · G
- *   p          = b_spend + H( ecdh ‖ t )   (mod n),  with  p·G == P
+ *   t_k        = H_tag("BIP0352/SharedSecret", ser_p(ecdh) ‖ ser32(k))
+ *   P_k        = B_spend + t_k·G,  spent with  p = b_spend + t_k  (p·G == P_k)
  *
- * Ported from the proven `arkade-try/stealth.ts`. Pure secp256k1 + sha256; no
- * SDK/provider/network deps. Pubkeys are 33-byte compressed hex; the x-only form
- * (taproot output key) is taken at the scanner boundary, not here.
+ * Taproot inputs contribute their even-Y key (BIP-352 §Inputs For Shared Secret
+ * Derivation); set `taproot: false` for non-taproot inputs (e.g. P2PKH/P2WPKH).
+ * Pure secp256k1 + sha256; no SDK/provider/network deps.
  */
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, concatBytes } from "@noble/hashes/utils.js";
+import { bech32m } from "@scure/base";
 
 type ProjPoint = ReturnType<typeof secp256k1.Point.fromBytes>;
 
@@ -31,53 +34,73 @@ const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 
 // ── scalar / point helpers ──────────────────────────────────────────────────
 
-/** Reduce into the scalar field [0, n). */
 function modN(x: bigint): bigint {
     return ((x % N) + N) % N;
 }
-
-/** Big-endian bytes -> bigint. */
-function bytesToBigInt(b: Uint8Array): bigint {
+function toBig(b: Uint8Array): bigint {
     return BigInt("0x" + (bytesToHex(b) || "0"));
 }
-
-/** Hash bytes -> nonzero scalar in [1, n). */
-function hashToScalar(...parts: Uint8Array[]): bigint {
-    const s = modN(bytesToBigInt(sha256(concatBytes(...parts))));
-    return s === 0n ? 1n : s;
+/** BIP-340 tagged hash: sha256(sha256(tag) ‖ sha256(tag) ‖ msg). */
+function taggedHash(tag: string, msg: Uint8Array): Uint8Array {
+    const t = sha256(new TextEncoder().encode(tag));
+    return sha256(concatBytes(t, t, msg));
 }
-
-/** 4-byte big-endian encoding of an output index / label. */
-function serT(t: number): Uint8Array {
+/** 4-byte big-endian counter (the BIP-352 output index k). */
+function ser32(k: number): Uint8Array {
     const b = new Uint8Array(4);
-    new DataView(b.buffer).setUint32(0, t >>> 0, false);
+    new DataView(b.buffer).setUint32(0, k >>> 0, false);
     return b;
 }
 
 const compressed = (p: ProjPoint): Uint8Array => p.toBytes(true);
 const pointFromHex = (h: string): ProjPoint => Point.fromBytes(hexToBytes(h));
 
-/**
- * BIP-352 taproot-input handling: inputs are x-only (even-Y) taproot keys, so
- * each input contributes its even-Y form. Normalize a scalar so its pubkey has
- * even Y (negate to n−a if odd); lift a pubkey to its even-Y point (negate if
- * odd). Both sides agree because `evenYScalar(a)·G == evenYPoint(a·G)`.
- */
+function randScalar(): bigint {
+    const b = new Uint8Array(32);
+    globalThis.crypto.getRandomValues(b);
+    const s = modN(toBig(b));
+    return s === 0n ? 1n : s;
+}
+
+/** Even-Y normalization for taproot inputs: scalar -> n−a if a·G is odd-Y. */
 function evenYScalar(a: bigint): bigint {
     const s = modN(a);
     return G.multiply(s).toBytes(true)[0] === 3 ? modN(N - s) : s;
 }
+/** Even-Y normalization for taproot inputs: lift a pubkey to its even-Y point. */
 function evenYPoint(pubHex: string): ProjPoint {
     const p = pointFromHex(pubHex);
     return p.toBytes(true)[0] === 3 ? p.negate() : p;
 }
 
-/** 32 secure-random bytes as a nonzero scalar. */
-function randScalar(): bigint {
-    const b = new Uint8Array(32);
-    globalThis.crypto.getRandomValues(b);
-    const s = modN(bytesToBigInt(b));
-    return s === 0n ? 1n : s;
+// ── outpoints (the per-venue replay nonce) ──────────────────────────────────
+
+export interface Outpoint {
+    txid: string; // display-order hex (as shown in explorers / SDK)
+    vout: number;
+}
+
+/** Parse a "txid:vout" id (e.g. an Arkade vtxoId) into an Outpoint. */
+export function parseOutpoint(id: string): Outpoint {
+    const i = id.lastIndexOf(":");
+    return { txid: id.slice(0, i), vout: Number(id.slice(i + 1)) };
+}
+
+/** Serialize an outpoint as in a Bitcoin tx: txid (internal byte order) ‖ vout (LE). */
+function serOutpoint(o: Outpoint): Uint8Array {
+    const txid = hexToBytes(o.txid).slice().reverse();
+    const vout = new Uint8Array(4);
+    new DataView(vout.buffer).setUint32(0, o.vout >>> 0, true);
+    return concatBytes(txid, vout);
+}
+
+/** The lexicographically smallest serialized outpoint among the inputs. */
+function smallestOutpoint(outpoints: Outpoint[]): Uint8Array {
+    if (outpoints.length === 0)
+        throw new Error("silent payment: at least one input required");
+    return outpoints
+        .map(serOutpoint)
+        .sort((a, b) => (bytesToHex(a) < bytesToHex(b) ? -1 : 1))[0]!;
 }
 
 // ── keys & meta-address ─────────────────────────────────────────────────────
@@ -86,20 +109,16 @@ export interface KeyPair {
     priv: bigint;
     pub: string; // 33-byte compressed hex
 }
-
 export interface MetaAddress {
     bScanPub: string; // B_scan  (33-byte compressed hex)
     bSpendPub: string; // B_spend (33-byte compressed hex)
 }
-
-/** Full recipient key material (kept private; never published). */
 export interface RecipientKeys {
-    scan: KeyPair; // (b_scan, B_scan) — also the view key secret
-    spend: KeyPair; // (b_spend, B_spend)
+    scan: KeyPair;
+    spend: KeyPair;
     meta: MetaAddress;
 }
-
-/** The view key: scan secret + spend *public* key. Detect-only — never carries b_spend. */
+/** Detect-only view key: scan secret + spend *public* key. Never carries b_spend. */
 export interface ViewKey {
     bScan: bigint;
     bSpendPub: string;
@@ -109,121 +128,154 @@ function keyPairFrom(priv: bigint): KeyPair {
     const p = modN(priv) === 0n ? 1n : modN(priv);
     return { priv: p, pub: bytesToHex(compressed(G.multiply(p))) };
 }
-
 export function generateKeyPair(): KeyPair {
     return keyPairFrom(randScalar());
 }
-
 export function generateRecipient(): RecipientKeys {
     const scan = generateKeyPair();
     const spend = generateKeyPair();
     return { scan, spend, meta: { bScanPub: scan.pub, bSpendPub: spend.pub } };
 }
-
-/** Derive a recipient deterministically from a 32-byte seed (for seed recovery). */
 export function recipientFromSeed(seed: Uint8Array): RecipientKeys {
+    const enc = new TextEncoder();
     const scan = keyPairFrom(
-        hashToScalar(seed, new TextEncoder().encode("scan"))
+        modN(toBig(sha256(concatBytes(seed, enc.encode("scan")))))
     );
     const spend = keyPairFrom(
-        hashToScalar(seed, new TextEncoder().encode("spend"))
+        modN(toBig(sha256(concatBytes(seed, enc.encode("spend")))))
     );
     return { scan, spend, meta: { bScanPub: scan.pub, bSpendPub: spend.pub } };
 }
-
-/** Extract the detect-only view key from full recipient material. */
 export function viewKeyOf(r: RecipientKeys): ViewKey {
     return { bScan: r.scan.priv, bSpendPub: r.meta.bSpendPub };
 }
 
-/** Hex-encode a meta-address as B_scan‖B_spend (66 bytes -> 132 hex chars). */
+/** Hex meta-address B_scan‖B_spend (internal). Prefer the `sp1` form for publishing. */
 export function encodeMetaAddress(m: MetaAddress): string {
     return m.bScanPub + m.bSpendPub;
 }
-
-/** Decode a hex meta-address. */
 export function decodeMetaAddress(hex: string): MetaAddress {
     if (hex.length !== 132)
         throw new Error("meta-address must be 132 hex chars (66 bytes)");
     return { bScanPub: hex.slice(0, 66), bSpendPub: hex.slice(66) };
 }
 
-// ── multi-input shared secret ───────────────────────────────────────────────
+// ── BIP-352 `sp1` bech32m address (the published, cross-rail form) ───────────
 
-/** Lexicographically smallest vtxoId — the canonical replay nonce for a tx. */
-function minNonce(vtxoIds: string[]): string {
-    if (vtxoIds.length === 0)
-        throw new Error("multi-input: at least one input required");
-    return vtxoIds.slice().sort()[0]!;
+function hrpFor(network: string): string {
+    return network === "bitcoin" || network === "mainnet" ? "sp" : "tsp";
+}
+/** Encode a meta-address as a BIP-352 `sp1…`/`tsp1…` address. */
+export function encodeSilentPaymentAddress(
+    m: MetaAddress,
+    network = "bitcoin"
+): string {
+    const payload = concatBytes(
+        hexToBytes(m.bScanPub),
+        hexToBytes(m.bSpendPub)
+    );
+    const words = [0, ...bech32m.toWords(payload)]; // version 0 ‖ B_scan‖B_spend
+    return bech32m.encode(hrpFor(network) as "sp", words, 1023);
+}
+/** Decode a BIP-352 `sp1…`/`tsp1…` address into a meta-address. */
+export function decodeSilentPaymentAddress(addr: string): MetaAddress {
+    const { words } = bech32m.decode(addr as `sp1${string}`, 1023);
+    const payload = bech32m.fromWords(words.slice(1)); // drop version word
+    if (payload.length !== 66)
+        throw new Error("sp address payload must be 66 bytes");
+    return {
+        bScanPub: bytesToHex(payload.slice(0, 33)),
+        bSpendPub: bytesToHex(payload.slice(33, 66)),
+    };
 }
 
-/** Sum compressed-hex pubkeys into A_sum (a point). */
-function sumPoints(pubs: string[]): ProjPoint {
+// ── BIP-352 shared secret ───────────────────────────────────────────────────
+
+function aSum(privs: bigint[], taproot: boolean): bigint {
+    return modN(
+        privs.reduce((s, a) => s + (taproot ? evenYScalar(a) : modN(a)), 0n)
+    );
+}
+function aSumPoint(pubs: string[], taproot: boolean): ProjPoint {
     if (pubs.length === 0)
-        throw new Error("multi-input: at least one input pubkey required");
-    return pubs.map(evenYPoint).reduce((acc, p) => acc.add(p));
+        throw new Error("silent payment: at least one input pubkey required");
+    return pubs
+        .map((p) => (taproot ? evenYPoint(p) : pointFromHex(p)))
+        .reduce((acc, p) => acc.add(p));
+}
+function inputHash(outpoints: Outpoint[], aSumPub: Uint8Array): bigint {
+    return modN(
+        toBig(
+            taggedHash(
+                "BIP0352/Inputs",
+                concatBytes(smallestOutpoint(outpoints), aSumPub)
+            )
+        )
+    );
+}
+function outputTweak(ecdh: ProjPoint, k: number): bigint {
+    return modN(
+        toBig(
+            taggedHash(
+                "BIP0352/SharedSecret",
+                concatBytes(compressed(ecdh), ser32(k))
+            )
+        )
+    );
 }
 
-/** Sum input pubkeys → A_sum as compressed hex. */
-export function sumPubkeys(pubs: string[]): string {
-    return bytesToHex(compressed(sumPoints(pubs)));
-}
-
-/** input_hash for an aggregated tx: H( min(vtxoId) ‖ A_sum ). */
-function aggInputHash(nonce: string, aSumPub: Uint8Array): bigint {
-    return hashToScalar(new TextEncoder().encode(nonce), aSumPub);
-}
-
-/** The per-output tweak scalar k = H( ecdh ‖ t ). */
-function outputTweak(ecdh: ProjPoint, t: number): bigint {
-    return hashToScalar(compressed(ecdh), serT(t));
+/** Sum input pubkeys → A_sum as compressed hex (even-Y per taproot input). */
+export function sumPubkeys(pubs: string[], taproot = true): string {
+    return bytesToHex(compressed(aSumPoint(pubs, taproot)));
 }
 
 // ── sender ──────────────────────────────────────────────────────────────────
 
 export interface SenderDeriveParams {
     meta: MetaAddress;
-    spenderPrivs: bigint[]; // aᵢ — all input secrets the sender controls
-    inputVtxoIds: string[]; // vtxoId per input
-    t: number; // output leafIndex inside the funding vtx
+    spenderPrivs: bigint[]; // aᵢ — the spent inputs' secrets
+    outpoints: Outpoint[]; // the spent inputs' outpoints (UTXO or VTXO)
+    t: number; // output counter k
+    taproot?: boolean; // inputs are taproot (default true; Arkade VTXOs always are)
 }
-
 export interface DerivedOutput {
-    P: string; // 33-byte compressed hex — the stealth pubkey to fund as userPK
+    P: string; // 33-byte compressed hex
+    xonly: string; // 32-byte x-only hex (the taproot output key)
     t: number;
 }
 
-/** Sender: derive the one-time stealth pubkey P to fund VTXO(P). */
 export function senderDerive(p: SenderDeriveParams): DerivedOutput {
-    const aSum = modN(p.spenderPrivs.reduce((s, x) => s + evenYScalar(x), 0n));
-    const aSumPub = compressed(G.multiply(aSum));
-    const ih = aggInputHash(minNonce(p.inputVtxoIds), aSumPub);
-    const ecdh = pointFromHex(p.meta.bScanPub).multiply(modN(ih * aSum));
-    const k = outputTweak(ecdh, p.t);
-    const P = pointFromHex(p.meta.bSpendPub).add(G.multiply(k));
-    return { P: bytesToHex(compressed(P)), t: p.t };
+    const taproot = p.taproot ?? true;
+    const a = aSum(p.spenderPrivs, taproot);
+    const aPub = compressed(G.multiply(a));
+    const ih = inputHash(p.outpoints, aPub);
+    const ecdh = pointFromHex(p.meta.bScanPub).multiply(modN(ih * a));
+    const tk = outputTweak(ecdh, p.t);
+    const P = pointFromHex(p.meta.bSpendPub).add(G.multiply(tk));
+    const hex = bytesToHex(compressed(P));
+    return { P: hex, xonly: hex.slice(2), t: p.t };
 }
 
 // ── scanner (view key only — detect, cannot spend) ──────────────────────────
 
 export interface ScanParams {
     viewKey: ViewKey;
-    senderPubs: string[]; // Aᵢ — every input pubkey revealed in the vtx
-    inputVtxoIds: string[];
+    senderPubs: string[]; // Aᵢ — the input pubkeys revealed in the tx
+    outpoints: Outpoint[];
     t: number;
+    taproot?: boolean;
 }
 
-/** Recompute the expected P for a candidate output using only the view key. */
 export function expectedP(p: ScanParams): string {
-    const ASum = sumPoints(p.senderPubs);
-    const ih = aggInputHash(minNonce(p.inputVtxoIds), compressed(ASum));
+    const taproot = p.taproot ?? true;
+    const ASum = aSumPoint(p.senderPubs, taproot);
+    const ih = inputHash(p.outpoints, compressed(ASum));
     const ecdh = ASum.multiply(modN(ih * modN(p.viewKey.bScan)));
-    const k = outputTweak(ecdh, p.t);
-    const P = pointFromHex(p.viewKey.bSpendPub).add(G.multiply(k));
+    const tk = outputTweak(ecdh, p.t);
+    const P = pointFromHex(p.viewKey.bSpendPub).add(G.multiply(tk));
     return bytesToHex(compressed(P));
 }
 
-/** True iff the candidate compressed-hex output pubkey belongs to this view key. */
 export function scanMatches(p: ScanParams, candidateP: string): boolean {
     return expectedP(p) === candidateP.toLowerCase();
 }
@@ -246,24 +298,32 @@ export function scanMatchesXOnly(
 // ── recipient (full keys — derive the spend key) ────────────────────────────
 
 export interface SpendKeyParams {
-    scanPriv: bigint; // b_scan
-    spendPriv: bigint; // b_spend
-    senderPubs: string[]; // Aᵢ
-    inputVtxoIds: string[];
+    scanPriv: bigint;
+    spendPriv: bigint;
+    senderPubs: string[];
+    outpoints: Outpoint[];
     t: number;
+    taproot?: boolean;
 }
 
-/** Recipient: derive the one-time spend secret p with p·G == P. */
 export function recipientSpendKey(p: SpendKeyParams): {
     priv: bigint;
     pub: string;
 } {
-    const ASum = sumPoints(p.senderPubs);
-    const ih = aggInputHash(minNonce(p.inputVtxoIds), compressed(ASum));
+    const taproot = p.taproot ?? true;
+    const ASum = aSumPoint(p.senderPubs, taproot);
+    const ih = inputHash(p.outpoints, compressed(ASum));
     const ecdh = ASum.multiply(modN(ih * modN(p.scanPriv)));
-    const k = outputTweak(ecdh, p.t);
-    const priv = modN(modN(p.spendPriv) + k);
+    const tk = outputTweak(ecdh, p.t);
+    const priv = modN(modN(p.spendPriv) + tk);
     return { priv, pub: bytesToHex(compressed(G.multiply(priv))) };
 }
 
-export const _internal = { modN, hashToScalar, G, N, minNonce, sumPoints };
+export const _internal = {
+    modN,
+    G,
+    N,
+    taggedHash,
+    serOutpoint,
+    smallestOutpoint,
+};

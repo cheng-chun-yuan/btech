@@ -10,7 +10,7 @@ import {
     generateRecipient,
     generateKeyPair,
     viewKeyOf,
-    encodeMetaAddress,
+    encodeSilentPaymentAddress,
     senderDerive,
     toXOnly,
     type RecipientKeys,
@@ -30,7 +30,8 @@ const scanner = new SilentPaymentScanner();
 scanner.registerViewKey(LABEL, viewKeyOf(treasury));
 
 export function metaAddress(): string {
-    return encodeMetaAddress(treasury.meta);
+    // One BIP-352 address (tsp1 on regtest) — works on L1 and Arkade alike.
+    return encodeSilentPaymentAddress(treasury.meta, "regtest");
 }
 
 export function getInbound(): DetectedPayment[] {
@@ -49,16 +50,17 @@ export function ingestCandidate(vtx: CandidateVtx): DetectedPayment[] {
  */
 export function simulateInbound(): DetectedPayment | null {
     const sender = generateKeyPair();
-    const vtxoId = `vtxo:${sender.pub.slice(2, 14)}:0`;
+    const txid = sender.pub.slice(2, 66); // 64-hex pseudo-txid for the spent input
+    const vtxoId = `${txid}:0`;
     const amount = 1000 * (1 + Math.floor(Math.random() * 200));
     const { P } = senderDerive({
         meta: treasury.meta,
         spenderPrivs: [sender.priv],
-        inputVtxoIds: [vtxoId],
+        outpoints: [{ txid, vout: 0 }],
         t: 0,
     });
     const candidate: CandidateVtx = {
-        vtxId: `ark:${sender.pub.slice(2, 14)}`,
+        vtxId: `ark:${txid.slice(0, 12)}`,
         inputs: [{ userPK: sender.pub, vtxoId }],
         outputs: [{ xonly: toXOnly(P), amount, leafIndex: 0 }],
     };

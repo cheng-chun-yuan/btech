@@ -14,7 +14,7 @@
  * third party, and the full history is reproducible from the seed + the stream.
  */
 
-import { type ViewKey, scanMatchesXOnly } from "./crypto";
+import { type ViewKey, scanMatchesXOnly, parseOutpoint } from "./crypto";
 
 /** A taproot output of a candidate vtx (the leaf userPK is x-only / 32-byte hex). */
 export interface CandidateOutput {
@@ -86,6 +86,7 @@ export class SilentPaymentScanner {
 
         const senderPubs = vtx.inputs.map((i) => i.userPK);
         const inputVtxoIds = vtx.inputs.map((i) => i.vtxoId);
+        const outpoints = inputVtxoIds.map(parseOutpoint); // vtxoIds are outpoints
 
         for (const [label, reg] of this.regs) {
             const known = this.knownP.get(label)!;
@@ -100,7 +101,8 @@ export class SilentPaymentScanner {
                 const params = {
                     viewKey: reg.viewKey,
                     senderPubs,
-                    inputVtxoIds,
+                    outpoints,
+                    taproot: true,
                     t: out.leafIndex,
                 };
                 if (!scanMatchesXOnly(params, out.xonly)) continue;
