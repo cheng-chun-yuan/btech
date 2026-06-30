@@ -295,6 +295,48 @@ export function scanMatchesXOnly(
     return toXOnly(expectedP(p)) === candidateXOnly.toLowerCase();
 }
 
+/** Even-Y compressed form of a pubkey — the BIP-352 contribution of a taproot input. */
+export function evenYCompressed(pubHex: string): string {
+    return bytesToHex(compressed(evenYPoint(pubHex)));
+}
+
+/** Maximum per-transaction outputs we probe for one recipient (BIP-352 counter cap). */
+const SCAN_K_MAX = 100;
+
+/**
+ * Scan one transaction for a view key using the proper BIP-352 counter loop:
+ * compute `P_k` for k = 0,1,… and match against the tx's taproot output keys,
+ * incrementing k only while a match is found. `contribPubsEvenY` are the already
+ * eligibility-filtered, even-Y-normalized input pubkeys (so pass `taproot:false`
+ * here — normalization is the caller's job); `outpoints` are ALL tx inputs'
+ * outpoints (BIP-352 uses the smallest across the whole tx).
+ */
+export function scanTx(
+    viewKey: ViewKey,
+    contribPubsEvenY: string[],
+    outpoints: Outpoint[],
+    candidateXOnlys: string[]
+): Array<{ xonly: string; k: number }> {
+    if (contribPubsEvenY.length === 0 || candidateXOnlys.length === 0) return [];
+    const remaining = new Set(candidateXOnlys.map((x) => x.toLowerCase()));
+    const matches: Array<{ xonly: string; k: number }> = [];
+    for (let k = 0; k < SCAN_K_MAX && remaining.size > 0; k++) {
+        const x = toXOnly(
+            expectedP({
+                viewKey,
+                senderPubs: contribPubsEvenY,
+                outpoints,
+                t: k,
+                taproot: false,
+            })
+        );
+        if (!remaining.has(x)) break; // stop at first miss (BIP-352 multi-output rule)
+        remaining.delete(x);
+        matches.push({ xonly: x, k });
+    }
+    return matches;
+}
+
 // ── recipient (full keys — derive the spend key) ────────────────────────────
 
 export interface SpendKeyParams {
