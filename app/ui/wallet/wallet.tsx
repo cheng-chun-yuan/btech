@@ -154,7 +154,6 @@ export default function Wallet() {
     role?: string;
   } | null>(null);
   const [signer, setSigner] = useState<NostrSigner | null>(null);
-  const [plain, setPlain] = useState<Record<string, string>>({});
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [audit, setAudit] = useState<{ entries?: AuditEntryUI[]; restricted?: boolean }>({});
   const [members, setMembers] = useState<
@@ -465,29 +464,6 @@ export default function Wallet() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signer, me?.npub, chats.map((c) => c.id).join(",")]);
 
-  // Decrypt the active DM's message history as messages arrive.
-  useEffect(() => {
-    if (!signer || !active || active.type !== "direct" || !active.counterpartyNpub) return;
-    const cp = active.counterpartyNpub;
-    let cancelled = false;
-    void (async () => {
-      const next: Record<string, string> = {};
-      for (const m of active.messages) {
-        if (plain[m.id] !== undefined) continue;
-        try {
-          next[m.id] = await signer.decrypt(cp, m.text);
-        } catch {
-          next[m.id] = "🔒 can't decrypt";
-        }
-      }
-      if (!cancelled && Object.keys(next).length) setPlain((p) => ({ ...p, ...next }));
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signer, active?.id, active?.messages.length]);
-
   // ---- approval actions ----
   // All signing is persisted server-side. For live approvals the route runs a
   // real grouped HTSS round in Rust and stores the aggregate signature; for
@@ -625,37 +601,25 @@ export default function Wallet() {
       return;
     }
     const cid = activeChat;
+    const chat = active;
     setDraft("");
     void (async () => {
-      let payload = text;
-      const dm = active && active.type === "direct" ? active : null;
-      if (dm) {
-        if (!signer || !dm.counterpartyNpub) {
-          setStateError("DM encryption unavailable — log in with a persona or a NIP-44 capable signer");
-          return;
-        }
-        try {
-          payload = await signer.encrypt(dm.counterpartyNpub, text);
-        } catch {
-          setStateError("Could not encrypt message");
-          return;
-        }
-      }
-      const res = await fetch("/api/messages", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ chatId: cid, text: payload }),
-      });
-      if (!res.ok) {
-        setStateError(((await res.json().catch(() => ({}))) as { error?: string }).error ?? "Message failed");
+      const client = chatClientRef.current;
+      if (!client || !chat) {
+        setStateError("Chat unavailable — the relay isn't connected yet");
         return;
       }
-      const { message } = (await res.json()) as { message: ChatMessage };
-      if (dm) setPlain((p) => ({ ...p, [message.id]: text })); // show our own plaintext immediately
-      setChats((prev) =>
-        prev.map((c) => (c.id === cid ? { ...c, messages: [...c.messages, message] } : c)),
-      );
-      void refreshAudit(cid);
+      const memberNpubs = members.map((m) => m.npub);
+      try {
+        await client.publish(cid, scopeFor(chat.type), memberNpubs, text);
+      } catch (e) {
+        setStateError(e instanceof Error ? e.message : "Message failed to send");
+        return;
+      }
+      // Metadata-only audit ping (no content); best-effort.
+      void fetch(`/api/chats/${cid}/audit`, { method: "POST" }).then(() => refreshAudit(cid));
+      // The sender's own fan-out copy comes back via the relay subscription, so
+      // no optimistic insert is needed — it appears when the relay echoes it.
     })();
   };
   const startDm = useCallback(
@@ -897,7 +861,6 @@ export default function Wallet() {
               onMemberClick={(mem) =>
                 setPopover({ npub: mem.npub, name: mem.label, initials: mem.initials, color: mem.color, role: mem.role })
               }
-              plain={plain}
               relayMessages={relayMsgs[active.id] ?? []}
               meNpub={me?.npub ?? ""}
             />
@@ -1377,7 +1340,6 @@ function ChatDetail({
   onAuthorClick,
   members,
   onMemberClick,
-  plain,
   relayMessages,
   meNpub,
 }: {
@@ -1404,7 +1366,6 @@ function ChatDetail({
   onAuthorClick: (m: ChatMessage) => void;
   members: { npub: string; label: string; role: string; initials: string; color: string }[];
   onMemberClick: (m: { npub: string; label: string; role: string; initials: string; color: string }) => void;
-  plain: Record<string, string>;
   relayMessages: DecryptedMessage[];
   meNpub: string;
 }) {
