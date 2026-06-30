@@ -474,10 +474,12 @@ impl VaultService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dkgkit_sdk::{GroupThresholdRequirement, RankedParticipant};
 
     #[test]
     fn exported_key_material_round_trips_the_grouped_config() {
-        let mut svc = VaultService::new(
+        // Step 1: build svc1, run DKG, export material.
+        let mut svc1 = VaultService::new(
             "v-roundtrip",
             "dkg-roundtrip",
             "regtest",
@@ -485,9 +487,75 @@ mod tests {
             crate::domain::policy::grouped_config_123_of_235().unwrap(),
         )
         .unwrap();
-        svc.connect_transport().unwrap();
-        svc.run_htss_dkg().unwrap();
-        let material = svc.export_key_material().unwrap();
-        assert_eq!(material.grouped_config, svc.grouped_config);
+        svc1.connect_transport().unwrap();
+        svc1.run_htss_dkg().unwrap();
+        let material = svc1.export_key_material().unwrap();
+
+        // Original assertion: export preserves the seed policy.
+        assert_eq!(material.grouped_config, svc1.grouped_config);
+
+        // Step 2: serde round-trip — also proves #[serde(default)] field survives JSON.
+        let json = serde_json::to_string(&material).unwrap();
+        let restored: VaultKeyMaterial = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.grouped_config, material.grouped_config);
+        assert_eq!(restored.shares.len(), material.shares.len());
+
+        // Step 3: build an alternate config (rank-2 is 3-of-4: drop one operator)
+        // so the import test proves the config is overwritten, not left at the seed.
+        let alt_config = GroupedThresholdConfig::new(
+            vec![
+                RankedParticipant::new(1, 0, Some("c-level-a".to_string())).unwrap(),
+                RankedParticipant::new(2, 0, Some("c-level-b".to_string())).unwrap(),
+                RankedParticipant::new(3, 1, Some("manager-a".to_string())).unwrap(),
+                RankedParticipant::new(4, 1, Some("manager-b".to_string())).unwrap(),
+                RankedParticipant::new(5, 1, Some("manager-c".to_string())).unwrap(),
+                RankedParticipant::new(6, 2, Some("operator-a".to_string())).unwrap(),
+                RankedParticipant::new(7, 2, Some("operator-b".to_string())).unwrap(),
+                RankedParticipant::new(8, 2, Some("operator-c".to_string())).unwrap(),
+                RankedParticipant::new(9, 2, Some("operator-d".to_string())).unwrap(),
+            ],
+            vec![
+                GroupThresholdRequirement::new(0, 1, 2).unwrap(),
+                GroupThresholdRequirement::new(1, 2, 3).unwrap(),
+                GroupThresholdRequirement::new(2, 3, 4).unwrap(), // 3-of-4, not 3-of-5
+            ],
+        )
+        .unwrap();
+        // alt_config has 9 participants; seed config has 10.
+        assert_eq!(alt_config.participants.len(), 9);
+
+        // Step 4: create svc2 from the seed config (10 participants), then import
+        // material whose grouped_config is the ALTERNATE policy (9 participants).
+        // This proves import_key_material actually replaces the config rather
+        // than being a no-op.
+        let mut svc2 = VaultService::new(
+            "v-restore",
+            "dkg-restore",
+            "regtest",
+            [0u8; 32],
+            crate::domain::policy::grouped_config_123_of_235().unwrap(),
+        )
+        .unwrap();
+        // svc2 starts with the 10-participant seed config.
+        assert_eq!(svc2.dkg.config.participants.len(), 10);
+
+        let mut alt_material = restored;
+        alt_material.grouped_config = alt_config.clone();
+        svc2.import_key_material(alt_material);
+
+        // Step 5: assert restore happened with the alternate config.
+        assert_eq!(svc2.grouped_config, alt_config);
+        // dkg was rebuilt from alt_config → 9 participants, not the seed's 10.
+        assert_eq!(svc2.dkg.config.participants.len(), 9);
+        // Group key was restored correctly.
+        assert_eq!(
+            svc2.export_key_material()
+                .unwrap()
+                .group_key
+                .xonly_public_key,
+            material.group_key.xonly_public_key,
+        );
+        // All local shares were imported.
+        assert_eq!(svc2.local_share_count(), material.shares.len());
     }
 }
