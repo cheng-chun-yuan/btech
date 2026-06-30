@@ -63,6 +63,12 @@ export function PolicyEditor({
     setDraft((d) => ({
       tiers: d.tiers.map((t) => (t.id !== tierId ? t : { ...t, signers: [...t.signers, { ...s, rank: t.rank }] })),
     }));
+  const removeTier = (tierId: string) => setDraft((d) => ({ tiers: d.tiers.filter((t) => t.id !== tierId) }));
+  const addTier = () =>
+    setDraft((d) => {
+      const rank = d.tiers.length ? Math.max(...d.tiers.map((t) => t.rank)) + 1 : 0;
+      return { tiers: [...d.tiers, { id: `t${rank}-${d.tiers.length}`, name: "New tier", rank, required: 1, signers: [] }] };
+    });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -74,6 +80,7 @@ export function PolicyEditor({
               <button onClick={() => setRequired(t.id, -1)} aria-label={`decrease ${t.name}`} style={stepBtn}>−</button>
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13 }}>{t.required} / {t.signers.length}</span>
               <button onClick={() => setRequired(t.id, +1)} aria-label={`increase ${t.name}`} style={stepBtn}>+</button>
+              <button onClick={() => removeTier(t.id)} aria-label={`remove tier ${t.name}`} title="Remove tier" style={stepBtn}>×</button>
             </span>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
@@ -102,6 +109,8 @@ export function PolicyEditor({
           </div>
         </div>
       ))}
+
+      <button onClick={addTier} aria-label="add tier" style={addTierBtn}>+ Add tier</button>
 
       {diff.length > 0 && (
         <div style={{ fontSize: 11.5, color: "#9CA1A7", lineHeight: 1.6 }}>
@@ -157,3 +166,13 @@ const chip = {
   color: "#EDEEF0",
 } as const;
 const chipX = { background: "transparent", border: "none", color: "#7C828A", cursor: "pointer", fontSize: 13, padding: 0 } as const;
+const addTierBtn = {
+  alignSelf: "flex-start",
+  background: "transparent",
+  border: "1px dashed rgba(255,255,255,.18)",
+  borderRadius: 9,
+  padding: "8px 14px",
+  color: "#9CA1A7",
+  cursor: "pointer",
+  fontSize: 12.5,
+} as const;

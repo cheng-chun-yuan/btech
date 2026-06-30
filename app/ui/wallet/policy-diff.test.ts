@@ -35,4 +35,24 @@ describe("diffPolicy", () => {
     const d = diffPolicy(base, draft);
     expect(d.some((x) => x.kind === "threshold")).toBe(true);
   });
+
+  it("detects an added tier", () => {
+    const draft = structuredClone(base);
+    draft.tiers.push({
+      id: "t1",
+      name: "New tier",
+      rank: 1,
+      required: 1,
+      signers: [{ participantId: 3, npub: "n3", label: "C", rank: 1 }],
+    });
+    const d = diffPolicy(base, draft);
+    expect(d.some((x) => x.kind === "add-tier")).toBe(true);
+  });
+
+  it("detects a removed tier", () => {
+    const draft = structuredClone(base);
+    draft.tiers = draft.tiers.filter((t) => t.id !== "t0");
+    const d = diffPolicy(base, draft);
+    expect(d.some((x) => x.kind === "remove-tier")).toBe(true);
+  });
 });
