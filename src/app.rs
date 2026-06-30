@@ -548,6 +548,72 @@ mod tests {
     }
 
     #[test]
+    fn reshare_rejects_non_quorum_set_without_mutating_state() {
+        let mut app = WalletApp::demo().unwrap();
+        app.init().unwrap();
+
+        // Capture the group key + receive address from the REAL vault accessors
+        // BEFORE attempting an unauthorized reshare.
+        let group_before = app.vault.group_xonly_public_key_hex().unwrap();
+        let addr_before = app.vault.derive_receive_address(0, 0, 0).unwrap().address;
+
+        // Ratifier set [1, 3, 6, 7, 8] is demo_invalid_signer_set(): it carries
+        // only ONE manager (id 3) where the rank-1 group requires 2, so it is NOT
+        // a valid quorum under the CURRENT seed 1-2-3-of-2-3-5 policy. reshare MUST
+        // error and leave vault state completely unchanged.
+        let new_grouped = crate::domain::policy::grouped_config_add_operator().unwrap();
+        let result = app.reshare(
+            "reshare-neg-1",
+            new_grouped,
+            vec![1, 3, 6, 7, 8],
+            "fp-new-policy",
+        );
+        assert!(
+            result.is_err(),
+            "non-quorum ratifier set must error, not reshare the vault"
+        );
+
+        // No partial state mutation: group key + receive address byte-identical
+        // to the BEFORE captures.
+        let group_after = app.vault.group_xonly_public_key_hex().unwrap();
+        let addr_after = app.vault.derive_receive_address(0, 0, 0).unwrap().address;
+        assert_eq!(
+            group_after, group_before,
+            "group key must be unchanged after a failed reshare"
+        );
+        assert_eq!(
+            addr_after, addr_before,
+            "receive address must be unchanged after a failed reshare"
+        );
+
+        // Corruption check: the vault still signs a payment under the ORIGINAL
+        // policy. A valid old-policy quorum [1,3,4,6,7,8] precommits + finalizes,
+        // and the aggregate must verify under the unchanged group key.
+        let pay_set: Vec<u16> = vec![1, 3, 4, 6, 7, 8];
+        for pid in &pay_set {
+            app.htss_precommit("pay-after-failed-reshare", *pid).unwrap();
+        }
+        let pay = app
+            .htss_finalize(
+                "pay-after-failed-reshare",
+                "pay-after-failed-reshare",
+                "bcrt1qexample",
+                100_000,
+                "memo",
+                pay_set.clone(),
+            )
+            .unwrap();
+        assert!(
+            pay.verified,
+            "old-policy quorum must still sign and verify after the failed reshare"
+        );
+        assert_eq!(pay.signers, pay_set);
+        // The post-failure payment is over the SAME unchanged group key + address.
+        assert_eq!(pay.group_xonly_public_key, group_before);
+        assert_eq!(pay.receive_address, addr_before);
+    }
+
+    #[test]
     fn session_proof_runs_tss_and_htss_end_to_end() {
         let report = WalletApp::run_session_proof("test-session").unwrap();
 
