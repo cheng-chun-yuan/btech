@@ -186,6 +186,16 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
           verified: report.verified,
         };
 
+        // web<->vaultd mirror is NOT atomic, and intentionally so. By this point
+        // vaultd has ALREADY reshared the key material — it is the authoritative
+        // source of the live policy. The UPDATE below only mirrors that into the
+        // `chats` row (display tiers + policyVersion). If this local sqlite write
+        // throws, the catch returns 502 and policyVersion is left un-bumped, so web
+        // is momentarily stale vs vaultd. That window is practically unreachable (a
+        // local sqlite write immediately after a 200 from vaultd) and self-corrects
+        // on the next reshare/retry; funds stay safe regardless because a reshare
+        // rotates shares only — the group key and receive address are invariant.
+        //
         // Mirror the new authoritative policy into the chat + bump policyVersion.
         // A reshare rotates key shares, not the group key, so the receive address
         // is unchanged — only the displayed tiers + version advance.

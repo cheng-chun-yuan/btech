@@ -60,6 +60,10 @@ struct ReshareReq {
     session: String,
     signer_set: Vec<u16>,
     new_config: dkgkit_sdk::GroupedThresholdConfig,
+    /// DEPRECATED / IGNORED. Accepted for wire compatibility but no longer
+    /// affects anything: `VaultService::reshare` derives the authorization
+    /// fingerprint server-side from `new_config`, never from this client string.
+    #[serde(default)]
     policy_fingerprint: String,
 }
 

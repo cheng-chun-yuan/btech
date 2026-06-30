@@ -370,6 +370,11 @@ impl WalletApp {
     /// (participant ids valid under the CURRENT policy). Returns the unchanged
     /// group key + address plus the ratifier authorization proof. `binding_id` is
     /// the approval id, not a cryptographic nonce.
+    ///
+    /// `policy_fingerprint` is DEPRECATED / IGNORED: it is passed through for wire
+    /// compatibility but no longer affects the authorization digest — vaultd
+    /// (`VaultService::reshare`) derives the bound fingerprint server-side from
+    /// `new_grouped`, so the digest is tied to the reshare target, not the client.
     pub fn reshare(
         &mut self,
         binding_id: &str,
@@ -699,6 +704,62 @@ mod tests {
         // The post-failure payment is over the SAME unchanged group key + address.
         assert_eq!(pay.group_xonly_public_key, group_before);
         assert_eq!(pay.receive_address, addr_before);
+    }
+
+    #[test]
+    fn reshare_digest_binds_new_config_not_client_fingerprint() {
+        // Security property (defense in depth): the reshare-authorization digest
+        // the ratifiers sign must be a pure function of the config vaultd actually
+        // reshares into (`new_grouped`), NOT of any client-supplied fingerprint.
+        //
+        // Two FRESH demo vaults reshare to the SAME add-operator policy under the
+        // same binding id, but pass DIFFERENT (now-ignored) client fingerprint
+        // strings. The resulting authorization digests must be EQUAL — proving the
+        // client string has no influence on what the ratifiers attest to.
+        let new_grouped = crate::domain::policy::grouped_config_add_operator().unwrap();
+        let ratifiers: Vec<u16> = vec![1, 3, 4, 6, 7, 8]; // valid under the seed policy
+
+        let mut app_a = WalletApp::demo().unwrap();
+        app_a.init().unwrap();
+        let report_a = app_a
+            .reshare(
+                "reshare-digest-bind",
+                new_grouped.clone(),
+                ratifiers.clone(),
+                "client-fingerprint-A", // ignored by vaultd
+            )
+            .unwrap();
+
+        let mut app_b = WalletApp::demo().unwrap();
+        app_b.init().unwrap();
+        let report_b = app_b
+            .reshare(
+                "reshare-digest-bind",
+                new_grouped.clone(),
+                ratifiers.clone(),
+                "client-fingerprint-COMPLETELY-DIFFERENT", // ignored by vaultd
+            )
+            .unwrap();
+
+        assert!(report_a.verified && report_b.verified);
+        assert_eq!(
+            report_a.authorization_digest, report_b.authorization_digest,
+            "authorization digest must derive from new_grouped, independent of the client fingerprint"
+        );
+
+        // And it is genuinely BOUND to `new_grouped`: signing the policy-change
+        // approval whose fingerprint is the serde encoding of new_grouped (the same
+        // value vaultd computes server-side) reproduces the exact digest.
+        let expected = crate::domain::approval::ApprovalRequest::policy_change(
+            "reshare-digest-bind",
+            "regtest",
+            serde_json::to_string(&new_grouped).unwrap(),
+        );
+        assert_eq!(
+            report_a.authorization_digest,
+            hex::encode(expected.digest()),
+            "digest must equal policy_change(<fingerprint computed from new_grouped>)"
+        );
     }
 
     #[test]

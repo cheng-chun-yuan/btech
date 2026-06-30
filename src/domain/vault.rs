@@ -384,17 +384,32 @@ impl VaultService {
         binding_id: &str,
         new_grouped: GroupedThresholdConfig,
         ratifier_set: Vec<ParticipantId>,
-        policy_fingerprint: &str,
+        // DEPRECATED / IGNORED. Kept only for wire compatibility with the
+        // web -> vaultd `/vault/reshare` body and the `WalletApp::reshare`
+        // signature. The reshare-authorization digest is NO LONGER derived from
+        // this client-supplied string — see below. A malicious or buggy client
+        // therefore cannot make the ratifiers' aggregate attest to a fingerprint
+        // that differs from the config vaultd actually reshares into.
+        _policy_fingerprint: &str,
     ) -> anyhow::Result<SigningResult> {
         // 1. Authorize: the ratifiers sign the policy-change digest with the
         //    CURRENT key material. Reuses the same single-shot grouped HTSS round
         //    payments use, but over the reshare digest. `sign_approval` validates
         //    the set against the CURRENT `grouped_config` and BIP340-verifies the
         //    aggregate, so it fails if the set is not a valid current-policy quorum.
+        //
+        //    Defense in depth: the fingerprint bound into the digest is computed
+        //    HERE, server-side, from `new_grouped` — the exact config this call is
+        //    about to reshare into — NOT from any client input. serde serializes
+        //    a struct's fields and its `Vec`s in a fixed declaration/insertion
+        //    order, so `to_string` is deterministic for a given config value; two
+        //    reshares into the same policy yield the same authorization digest,
+        //    and the ratifiers provably authorize the reshare target.
+        let policy_fingerprint = serde_json::to_string(&new_grouped)?;
         let approval = ApprovalRequest::policy_change(
             binding_id.to_string(),
             self.network.clone(),
-            policy_fingerprint.to_string(),
+            policy_fingerprint,
         );
         let authorization = self.sign_approval(binding_id, &approval, ratifier_set.clone())?;
         anyhow::ensure!(

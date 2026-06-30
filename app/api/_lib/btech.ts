@@ -296,6 +296,9 @@ export type ReshareParams = {
   session: string;
   signerSet: number[];
   newConfig: GroupedConfigWire;
+  /** DEPRECATED / IGNORED by vaultd: the reshare-authorization digest is derived
+   *  server-side from `newConfig`, never from this string. Sent only for wire
+   *  compatibility. */
   policyFingerprint: string;
 };
 
