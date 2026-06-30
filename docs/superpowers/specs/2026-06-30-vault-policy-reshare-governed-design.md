@@ -43,6 +43,11 @@ the authorization digest and the post-finalize action differ.
 - **Continuity:** the group public key and the Taproot receive address **must
   not change** across a reshare. A reshare that would change the group key is a
   bug and must error before any state swap.
+- **Policy authority:** when vaultd is present it **owns the active
+  cryptographic policy** — its shares are dealt for one specific config, so the
+  policy of record is whatever those shares can actually sign for. The web DB
+  **mirrors** it and owns the governance/audit layer (proposals, diffs, votes,
+  audit). With no vaultd, the web DB's `tiers` is authoritative by default.
 - **Edit scope:** **full structural edits** — add/remove signers, change each
   tier's threshold, add/remove whole tiers. Reconstruct-then-redeal supports any
   new config at no extra crypto cost.
@@ -72,8 +77,9 @@ the authorization digest and the post-finalize action differ.
              this exact new policy."
 5. Apply   → On quorum, vaultd verifies the aggregate, then calls the native
              reshare → new shares for the new config, SAME group key, SAME
-             address. Persist the new policy, bump policyVersion, audit-log; the
-             card flips to "Change applied to the vault policy."
+             address. vaultd returns the new authoritative config; the web
+             mirrors it, bumps policyVersion, audit-logs; the card flips to
+             "Change applied to the vault policy."
 ```
 
 ## Data model
@@ -100,11 +106,15 @@ threshold, and signer entries `{ participantId, npub, label, rank }`), i.e. a
 serializable form of `tiers: Tier[]` that round-trips to the Rust
 grouped/hierarchical config.
 
-**Persisted current policy:** the vault's canonical policy must live server-side
-and update on apply. The `chats`/vault row owns the `tiers` JSON; reshare apply
-rewrites it and bumps an integer `policyVersion`. (Today the live config is only
-the Rust seed + client `tiers`; this spec makes the web DB the source of truth
-for the *current* policy, with vaultd holding the matching shares.)
+**Persisted current policy (authority + mirror):** the **active cryptographic
+policy is owned by vaultd** — its shares are dealt for one specific config, so
+the policy of record is whatever those shares can actually sign for. A successful
+reshare returns the new config; the web DB then updates its `tiers` mirror and
+bumps an integer `policyVersion` to match. The web DB **never** optimistically
+advertises a policy the shares cannot honor. The web DB remains authoritative for
+the **governance layer** (proposals, diffs, ratifier votes, audit). **Fallback
+(no vaultd):** there are no real shares, so the web DB's `tiers` is the only
+record and is authoritative by default.
 
 DB migration: bump `schema_meta`; add `policy_version` and persisted policy
 columns if absent (the app owns the SQLite schema in `app/api/_lib/db.ts`).
@@ -179,8 +189,8 @@ requires vaultd" status. The access-control half ships regardless.
 - `POST /api/approvals/[id]/sign` — the selected-signer gate from C, plus: at
   quorum, if `basePolicyVersion != vault.policyVersion` → reject
   ("policy changed since proposed; re-propose"); else call vaultd `runReshare`.
-  On success, rewrite the vault's persisted policy, bump `policyVersion`, set
-  `status:"ready"`, audit `policy/applied`.
+  On success, mirror vaultd's returned authoritative config into the vault row,
+  bump `policyVersion`, set `status:"ready"`, audit `policy/applied`.
 
 ## UI
 
@@ -204,8 +214,16 @@ requires vaultd" status. The access-control half ships regardless.
 - **Stale proposal (lost-update guard):** `basePolicyVersion` mismatch at apply
   → reject; proposer must re-propose against the new base. Prevents two reshares
   racing from the same base.
-- **Invalid new config** (threshold > tier size, empty tier, 0-threshold):
-  editor blocks Propose; vaultd rejects too (defense in depth).
+The governing rule: **can a quorum still sign under the new policy? Yes →
+warn-and-allow. No → hard-block.**
+
+- **Bricking = hard block (safety floor).** A config that can *never* reach
+  quorum — tier threshold > its members, empty required tier, 0-threshold, or a
+  required signer nobody controls — would freeze funds permanently. The editor
+  disables Propose and vaultd rejects. This is an absolute block, not a warning.
+- **Weak but satisfiable = warn, allow.** Dropping to 1-of-1, self-removal, or
+  otherwise loosening a *still-signable* policy is the current quorum's
+  prerogative — they are the ones ratifying it. Warn loudly, then allow.
 - **Invalid ratifier set** (not current-policy-valid): cannot reconstruct →
   rejected; the auto-default avoids this.
 - **Group-key invariant:** if `reshare_htss` would change the group key, vaultd
@@ -213,9 +231,6 @@ requires vaultd" status. The access-control half ships regardless.
 - **In-flight signing during reshare:** reshare invalidates old shares; vaultd
   drains/aborts open signing sessions for the vault; pending *payment* approvals
   must re-collect under the new shares.
-- **Lock-out / weakening warnings:** the editor warns (but allows, if the quorum
-  ratifies) when a proposer removes themselves, drops to 1-of-1, or otherwise
-  weakens safety.
 - **Non-member proposer:** 403 via the existing membership gate; audit
   `policy/failed`.
 
