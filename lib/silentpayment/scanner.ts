@@ -31,6 +31,9 @@ export interface CandidateVtx {
     batchId?: string;
     inputs: Array<{ userPK: string; vtxoId: string }>;
     outputs: CandidateOutput[];
+    /** Inputs are taproot (default true — Arkade VTXOs). Set false for L1
+     *  P2WPKH/P2PKH inputs, whose pubkeys are used as-is (no even-Y lift). */
+    taproot?: boolean;
 }
 
 export interface DetectedPayment {
@@ -102,7 +105,7 @@ export class SilentPaymentScanner {
                     viewKey: reg.viewKey,
                     senderPubs,
                     outpoints,
-                    taproot: true,
+                    taproot: vtx.taproot ?? true,
                     t: out.leafIndex,
                 };
                 if (!scanMatchesXOnly(params, out.xonly)) continue;
