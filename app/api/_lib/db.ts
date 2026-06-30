@@ -8,7 +8,7 @@ import { migrateSubledger, seedConfig } from "./subledger";
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 export function migrate(db: DB): void {
   db.pragma("journal_mode = WAL");
@@ -124,6 +124,9 @@ export function migrate(db: DB): void {
     if (!sigCols.includes("precommit")) {
       db.prepare("ALTER TABLE approval_signatures ADD COLUMN precommit TEXT").run();
     }
+    // v9: governed policy reshare. No new columns — policy-change proposals ride
+    // in approvals.data_json (proposedPolicy/policyDiff/basePolicyVersion) and a
+    // mirrored policyVersion rides in chats.data_json, defaulting to 0 when absent.
     db.prepare("UPDATE schema_meta SET version = ?").run(SCHEMA_VERSION);
   }
 }

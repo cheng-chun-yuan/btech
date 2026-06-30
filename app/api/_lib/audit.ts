@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { DB } from "./db";
 
-export type AuditAction = "propose" | "sign" | "message" | "join";
+export type AuditAction = "propose" | "sign" | "message" | "join" | "reshare";
 export type AuditOutcome = "success" | "failed";
 export type AuditEntry = {
   id: string;
