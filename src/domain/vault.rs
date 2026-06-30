@@ -303,6 +303,8 @@ impl VaultService {
         let digest = approval.digest();
 
         // Pair each selected signer with its share + pre-committed local nonce.
+        // `local_nonces` borrows self.sign_sessions; the loop clones every value
+        // into `selected` so the borrow ends when the loop exits (NLL).
         let mut selected = Vec::with_capacity(signer_set.len());
         for pid in &signer_set {
             let share = self
@@ -316,6 +318,10 @@ impl VaultService {
                 .ok_or_else(|| anyhow::anyhow!("signer {} has not pre-committed", pid.0))?;
             selected.push((share, nonce));
         }
+        // Consume the session immediately — `selected` now owns all needed nonce
+        // material, so the map entry is dead. Removing here (before any fallible
+        // I/O) ensures the session is dropped even if signing later errors out.
+        self.sign_sessions.remove(signing_session_id);
 
         let public_nonces = self.coordinator.drain_htss_nonces(&session)?;
         for (share, nonce) in &selected {
@@ -340,8 +346,6 @@ impl VaultService {
             &self.dkg.config,
         )?;
         let verified = verify_aggregate_signature_digest(&group_key, &digest, &aggregate)?;
-        // Single-use: drop the session's nonces no matter the outcome.
-        self.sign_sessions.remove(signing_session_id);
         anyhow::ensure!(verified, "aggregate signature failed Bitcoin verification");
 
         Ok(SigningResult {

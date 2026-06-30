@@ -413,6 +413,15 @@ mod tests {
         for pid in &set {
             app.htss_precommit("tx-collapsed-1", *pid).unwrap();
         }
+        // Idempotency: re-calling precommit for the same (session, participant)
+        // must return the already-published package, not a fresh nonce.
+        let first = app.htss_precommit("tx-collapsed-1", 1).unwrap();
+        let second = app.htss_precommit("tx-collapsed-1", 1).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec(&second).unwrap(),
+            "htss_precommit must be idempotent: second call returned a different package"
+        );
         let report = app
             .htss_finalize("tx-collapsed-1", "tx-collapsed-1", "bcrt1qexample", 100_000, "memo", set.clone())
             .unwrap();
