@@ -1,17 +1,28 @@
 use dkgkit_nostr::LocalNostrEventTransport;
 use dkgkit_sdk::bitcoin::{
-    taproot_child_address_descriptor_for_network, verify_aggregate_signature_digest,
-    BitcoinAccountKey, BitcoinAddressDescriptor, BitcoinDerivationPath,
+    taproot_child_address_descriptor_for_network, taproot_child_key_tweak,
+    verify_aggregate_signature_digest, BitcoinAccountKey, BitcoinAddressDescriptor,
+    BitcoinDerivationPath, TaprootKeyTweak,
 };
 use dkgkit_sdk::{
-    aggregate_htss_signature_shares, hierarchical_config_from_grouped_threshold, htss_nonce,
-    htss_sign_share, validate_grouped_threshold_signer_set, DkgKitError, FrostCoordinator,
-    GroupKey, GroupedThresholdConfig, HtssDkgRound1State, HtssDkgService, HtssLocalKeyShare,
-    ParticipantId, Result, SessionId,
+    aggregate_htss_signature_shares, aggregate_htss_signature_shares_for_output,
+    hierarchical_config_from_grouped_threshold, htss_nonce, htss_sign_share,
+    htss_sign_share_for_output, validate_grouped_threshold_signer_set, DkgKitError,
+    FrostCoordinator, GroupKey, GroupedThresholdConfig, HtssDkgRound1State, HtssDkgService,
+    HtssLocalKeyShare, ParticipantId, Result, SessionId,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::domain::approval::ApprovalRequest;
+
+/// Finalized vault key material, enough to sign without re-running DKG. Persisted
+/// by long-lived services so a restart keeps the same group key (and addresses).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultKeyMaterial {
+    pub group_key: GroupKey,
+    pub shares: Vec<HtssLocalKeyShare>,
+}
 
 pub struct VaultService {
     pub vault_id: String,
@@ -122,6 +133,44 @@ impl VaultService {
         taproot_child_address_descriptor_for_network(&account_key, &self.network, path)
     }
 
+    /// The additive key tweak between the group key and the BIP86 `account/change/index`
+    /// receive output key, so the vault can sign a real key-path spend of that address.
+    pub fn receive_key_tweak(
+        &self,
+        account: u32,
+        change: u32,
+        address_index: u32,
+    ) -> anyhow::Result<TaprootKeyTweak> {
+        let group_key = self
+            .group_key
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("vault DKG is not finalized"))?;
+        let account_key = BitcoinAccountKey::new(group_key, self.chain_code);
+        let path = BitcoinDerivationPath::bip86(account, change, address_index);
+        Ok(taproot_child_key_tweak(&account_key, &self.network, path)?)
+    }
+
+    /// Export the finalized key material (group key + local shares) for persistence.
+    /// Returns `None` until DKG has finalized.
+    pub fn export_key_material(&self) -> Option<VaultKeyMaterial> {
+        let group_key = self.group_key.clone()?;
+        Some(VaultKeyMaterial {
+            group_key,
+            shares: self.local_shares.values().cloned().collect(),
+        })
+    }
+
+    /// Restore finalized key material, skipping DKG. Subsequent signing reuses the
+    /// loaded group key and shares, so the receive addresses are unchanged.
+    pub fn import_key_material(&mut self, material: VaultKeyMaterial) {
+        self.group_key = Some(material.group_key);
+        self.local_shares = material
+            .shares
+            .into_iter()
+            .map(|share| (share.participant_id, share))
+            .collect();
+    }
+
     pub fn sign_approval(
         &mut self,
         signing_session_id: impl Into<String>,
@@ -191,6 +240,87 @@ impl VaultService {
             signer_ids: signer_set.iter().map(|id| id.0).collect(),
             verified,
         })
+    }
+
+    /// Sign a Taproot key-path spend sighash with the vault's BIP86 receive key.
+    ///
+    /// The receive address is a BIP86 child of the group key, so the witness
+    /// signature must verify under the tweaked output key rather than the group
+    /// key. Callers pass the per-address `output_xonly` / `tweak` / `negate_key`
+    /// from `taproot_child_key_tweak`; the grouped HTSS round runs exactly as for
+    /// an approval, but the challenge commits to the output key and the aggregate
+    /// is tweak-adjusted. Returns the 64-byte BIP340 aggregate signature.
+    pub fn sign_taproot_keyspend_sighash(
+        &mut self,
+        signing_session_id: impl Into<String>,
+        sighash: [u8; 32],
+        output_xonly: [u8; 32],
+        tweak: [u8; 32],
+        negate_key: bool,
+        signer_set: Vec<ParticipantId>,
+    ) -> anyhow::Result<[u8; 64]> {
+        validate_grouped_threshold_signer_set(&signer_set, &self.grouped_config)?;
+        let group_key = self
+            .group_key
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("vault DKG is not finalized"))?;
+        let signing_session_id = SessionId::new(signing_session_id)?;
+
+        let selected_shares = signer_set
+            .iter()
+            .map(|participant_id| {
+                self.local_shares
+                    .get(participant_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("missing local share for signer {}", participant_id.0)
+                    })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let local_nonces = selected_shares
+            .iter()
+            .map(|share| htss_nonce(signing_session_id.clone(), share))
+            .collect::<Result<Vec<_>>>()?;
+        for nonce in &local_nonces {
+            self.coordinator.publish_htss_nonce(&nonce.package)?;
+        }
+        let public_nonces = self.coordinator.drain_htss_nonces(&signing_session_id)?;
+
+        for (share, nonce) in selected_shares.iter().zip(local_nonces.iter()) {
+            let signature_share = htss_sign_share_for_output(
+                &group_key,
+                sighash,
+                output_xonly,
+                negate_key,
+                share,
+                nonce,
+                &public_nonces,
+                &signer_set,
+                &self.dkg.config,
+            )?;
+            self.coordinator
+                .publish_htss_signature_share(&signature_share)?;
+        }
+
+        let signature_shares = self
+            .coordinator
+            .drain_htss_signature_shares(&signing_session_id)?;
+        let aggregate = aggregate_htss_signature_shares_for_output(
+            sighash,
+            output_xonly,
+            tweak,
+            &public_nonces,
+            &signature_shares,
+            &signer_set,
+            &self.dkg.config,
+        )?;
+        let signature: [u8; 64] = aggregate
+            .signature_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("aggregate signature must be 64 bytes"))?;
+        Ok(signature)
     }
 
     pub fn group_xonly_public_key_hex(&self) -> anyhow::Result<String> {

@@ -19,12 +19,13 @@ describe("db", () => {
     }
   });
 
-  it("seeds the mock chats and approvals once (idempotent)", () => {
+  it("seeds the vault channels once (idempotent); approvals are user-created", () => {
     const db = openTestDb();
     const chats1 = db.prepare("SELECT COUNT(*) c FROM chats").get() as { c: number };
     const approvals1 = db.prepare("SELECT COUNT(*) c FROM approvals").get() as { c: number };
     expect(chats1.c).toBeGreaterThan(0);
-    expect(approvals1.c).toBeGreaterThan(0);
+    // No seeded approval fixtures — they are created via POST /api/approvals.
+    expect(approvals1.c).toBe(0);
     // Re-seeding must not duplicate.
     seed(db);
     const chats2 = db.prepare("SELECT COUNT(*) c FROM chats").get() as { c: number };

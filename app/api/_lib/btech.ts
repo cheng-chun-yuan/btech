@@ -158,6 +158,44 @@ export async function runSignApproval(
   ]) as Promise<DemoReport>;
 }
 
+export type SettlementInput = { txid: string; vout: number; valueSats: number };
+
+export type SettlementReport = {
+  txid: string;
+  raw_tx_hex: string;
+  vault_address: string;
+  recipient: string;
+  amount_sats: number;
+  change_sats: number;
+  fee_sats: number;
+  signers: number[];
+};
+
+export type SettleParams = {
+  recipient: string;
+  amountSats: number;
+  feeSats: number;
+  inputs: SettlementInput[];
+};
+
+/** Build + threshold-sign a real Taproot key-path spend out of `vaultId`'s vault
+ * via btech-vaultd. Returns the broadcastable raw transaction; the caller is
+ * responsible for broadcasting it to the chain. Requires btech-vaultd. */
+export async function runSettle(p: SettleParams, vaultId = "treasury"): Promise<SettlementReport> {
+  if (!VAULTD_URL) {
+    throw new Error("BTECH_VAULTD_URL is required for on-chain settlement");
+  }
+  const res = await fetch(`${VAULTD_URL}/vault/settle?id=${encodeURIComponent(vaultId)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(p),
+  });
+  if (!res.ok) {
+    throw new Error(`vaultd settle failed: ${res.status} ${await res.text().catch(() => "")}`);
+  }
+  return (await res.json()) as SettlementReport;
+}
+
 export function runSessionProof(sessionId: string): Promise<SessionProofReport> {
   const id = sessionId.trim().length > 0 ? sessionId.trim() : "btech-session-proof";
   return runBtech(["--session-proof-json", "--session-id", id]) as Promise<SessionProofReport>;

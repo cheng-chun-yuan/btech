@@ -26,6 +26,30 @@ export async function GET() {
     })) as unknown as ChatMessage[];
     return { ...meta, messages };
   });
+
+  // Back any active vault channel that lacks a receive address (the cold/petty
+  // seed channels ship without one) with its own real DKG vault. Each id gets a
+  // distinct, stable Taproot address from vaultd; we derive it once and persist
+  // it so the channel is fundable on regtest and later loads are instant.
+  const unprovisioned = chats.filter(
+    (c) => c.type === "channel" && c.vaultStatus === "active" && !c.receiveAddress,
+  );
+  if (unprovisioned.length > 0) {
+    const update = db.prepare("UPDATE chats SET data_json = ? WHERE id = ?");
+    await Promise.all(
+      unprovisioned.map(async (c) => {
+        try {
+          c.receiveAddress = (await runDemo(c.id)).receive_address;
+          const { messages: _messages, ...meta } = c;
+          update.run(JSON.stringify(meta), c.id);
+        } catch {
+          // vaultd unreachable → leave it unprovisioned; the client treats a
+          // missing address as 0 balance and we retry on the next load.
+        }
+      }),
+    );
+  }
+
   return NextResponse.json({ chats });
 }
 

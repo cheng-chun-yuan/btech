@@ -6,6 +6,7 @@
 //! you can deposit regtest funds into.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -16,10 +17,11 @@ use axum::{
 };
 use serde::Deserialize;
 
-use btech::{DemoReport, WalletApp};
+use btech::{DemoReport, SettlementReport, SettlementRequest, VaultKeyMaterial, WalletApp};
 
 struct AppState {
     vaults: Mutex<HashMap<String, WalletApp>>,
+    data_dir: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -40,7 +42,53 @@ fn err500(e: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
-/// Get the vault for `id`, creating + running its DKG once on first use.
+/// On-disk path for a vault's persisted key material.
+fn vault_path(data_dir: &Path, id: &str) -> PathBuf {
+    let safe: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    data_dir.join(format!("{safe}.json"))
+}
+
+/// Load a vault's persisted key material, or run DKG once and persist it. This
+/// keeps each vault's group key — and therefore its receive addresses — stable
+/// across restarts, so funds deposited to a vault stay spendable.
+fn load_or_create_vault(data_dir: &Path, id: &str) -> anyhow::Result<WalletApp> {
+    let path = vault_path(data_dir, id);
+    if let Ok(bytes) = std::fs::read(&path) {
+        match serde_json::from_slice::<VaultKeyMaterial>(&bytes) {
+            Ok(material) => {
+                eprintln!("btech-vaultd: loaded persisted vault '{id}'");
+                return WalletApp::load(material);
+            }
+            Err(err) => eprintln!("btech-vaultd: ignoring corrupt vault file for '{id}': {err}"),
+        }
+    }
+    let mut app = WalletApp::demo()?;
+    app.init()?;
+    if let Some(material) = app.export_vault() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        match serde_json::to_vec_pretty(&material) {
+            Ok(serialized) => match std::fs::write(&path, serialized) {
+                Ok(()) => eprintln!("btech-vaultd: provisioned + persisted vault '{id}'"),
+                Err(err) => eprintln!("btech-vaultd: failed to persist vault '{id}': {err}"),
+            },
+            Err(err) => eprintln!("btech-vaultd: failed to serialize vault '{id}': {err}"),
+        }
+    }
+    Ok(app)
+}
+
+/// Get the vault for `id`, loading (or running DKG once + persisting) on first use.
 fn with_vault<T>(
     state: &AppState,
     id: &str,
@@ -48,9 +96,7 @@ fn with_vault<T>(
 ) -> anyhow::Result<T> {
     let mut map = state.vaults.lock().expect("vault map lock");
     if !map.contains_key(id) {
-        let mut app = WalletApp::demo()?;
-        app.init()?;
-        eprintln!("btech-vaultd: provisioned vault '{id}'");
+        let app = load_or_create_vault(&state.data_dir, id)?;
         map.insert(id.to_string(), app);
     }
     f(map.get_mut(id).expect("vault present"))
@@ -82,10 +128,27 @@ async fn vault_sign(
     Ok(Json(report))
 }
 
+/// Build, sign, and return a broadcastable Taproot key-path spend out of the
+/// vault. The caller broadcasts the returned raw transaction.
+async fn vault_settle(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<VaultQuery>,
+    Json(req): Json<SettlementRequest>,
+) -> Result<Json<SettlementReport>, (StatusCode, String)> {
+    let id = q.id.unwrap_or_else(|| "treasury".to_string());
+    let report = with_vault(&state, &id, |app| app.settle_taproot_spend(req)).map_err(err500)?;
+    Ok(Json(report))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let data_dir = PathBuf::from(
+        std::env::var("BTECH_VAULTD_DATA").unwrap_or_else(|_| "data/vaultd".to_string()),
+    );
+    std::fs::create_dir_all(&data_dir).ok();
     let state = Arc::new(AppState {
         vaults: Mutex::new(HashMap::new()),
+        data_dir,
     });
     // Warm the default treasury vault so the first page load is instant.
     with_vault(&state, "treasury", |_| Ok(()))?;
@@ -94,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(healthz))
         .route("/vault/state", get(vault_state))
         .route("/vault/sign", post(vault_sign))
+        .route("/vault/settle", post(vault_settle))
         .with_state(state);
 
     let port = std::env::var("BTECH_VAULTD_PORT").unwrap_or_else(|_| "8787".to_string());

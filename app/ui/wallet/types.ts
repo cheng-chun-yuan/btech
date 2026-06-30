@@ -96,6 +96,8 @@ export type Approval = {
   amountSats?: number;
   /** Real cryptographic result, populated after a live signing round. */
   proof?: SigningProof;
+  /** On-chain txid, populated once the approval is broadcast. */
+  txid?: string;
 };
 
 export type SigningProof = {

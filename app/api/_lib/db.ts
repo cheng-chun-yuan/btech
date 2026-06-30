@@ -8,7 +8,7 @@ import { migrateSubledger, seedConfig } from "./subledger";
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 7;
 
 export function migrate(db: DB): void {
   db.pragma("journal_mode = WAL");
@@ -106,13 +106,18 @@ export function migrate(db: DB): void {
   if (!row) {
     db.prepare("INSERT INTO schema_meta (version) VALUES (?)").run(SCHEMA_VERSION);
   } else if (row.version < SCHEMA_VERSION) {
-    // v5: the cold/petty seed channels used to ship hand-typed placeholder
-    // receive addresses (and inert mock approvals). Drop those rows so seed()
-    // re-creates them clean — real DKG addresses are then provisioned lazily and
-    // their send approvals sign a real grouped HTSS round. Messages live in their
-    // own table, so this does not lose chat history.
-    db.prepare("DELETE FROM chats WHERE id IN ('cold', 'petty')").run();
-    db.prepare("DELETE FROM approvals WHERE id IN ('tx2', 'tx3')").run();
+    if (row.version < 5) {
+      // v5: drop the cold/petty seed channels that shipped placeholder receive
+      // addresses so seed() re-creates them; real DKG addresses are provisioned
+      // lazily. Messages live in their own table, so chat history is preserved.
+      // (Skipped for v5+ DBs so their real funded addresses are untouched.)
+      db.prepare("DELETE FROM chats WHERE id IN ('cold', 'petty')").run();
+    }
+    // v6: only true data — drop the mock DMs and the mock role-change approval.
+    db.prepare("DELETE FROM chats WHERE id IN ('dm-ana', 'dm-ravi')").run();
+    // v7: approvals are user-created and stored in the DB, with no seeded or
+    // hardcoded fixtures. Drop the seeded transfers + the old live fixture row.
+    db.prepare("DELETE FROM approvals WHERE id IN ('tx1', 'tx2', 'tx3', 'rc2')").run();
     db.prepare("UPDATE schema_meta SET version = ?").run(SCHEMA_VERSION);
   }
 }

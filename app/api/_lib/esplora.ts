@@ -71,6 +71,24 @@ export async function addressUtxos(address: string): Promise<Utxo[]> {
   return (await res.json()) as Utxo[];
 }
 
+export type EsploraTx = {
+  txid: string;
+  vin: { prevout?: { scriptpubkey_address?: string; value?: number } }[];
+  vout: { scriptpubkey_address?: string; value: number }[];
+  status: { confirmed: boolean; block_height?: number; block_time?: number };
+  fee?: number;
+};
+
+/**
+ * Recent transactions touching an address. Esplora returns up to 50, newest
+ * first (mempool, then confirmed by descending height).
+ */
+export async function addressTxs(address: string): Promise<EsploraTx[]> {
+  const res = await api(`/api/address/${address}/txs`);
+  if (!res.ok) throw new Error(`txs ${res.status}`);
+  return (await res.json()) as EsploraTx[];
+}
+
 /** Broadcast a raw transaction hex; returns the txid. */
 export async function broadcastTx(rawHex: string): Promise<string> {
   const res = await api("/api/tx", { method: "POST", body: rawHex });

@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 import { ApprovalCard } from "./approval-card";
-import { buildLiveApproval, buildLiveVault } from "./data";
+import { buildLiveVault } from "./data";
 import { useBtcPrice } from "./use-btc-price";
 import type {
   Approval,
@@ -70,6 +70,34 @@ function statusLabelOf(k: SignerKey): string {
   return "Online";
 }
 
+// On-chain activity derived from /api/chain/activity (real esplora tx history).
+type ActivityApiEntry = {
+  txid: string;
+  address: string;
+  direction: "in" | "out";
+  deltaSats: number;
+  confirmed: boolean;
+  blockHeight: number | null;
+  blockTime: number | null;
+  txUrl: string;
+};
+type ActivityRow = ActivityApiEntry & { vault: string };
+
+function fmtBtc(sats: number): string {
+  return (Math.abs(sats) / 1e8).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 8,
+  });
+}
+function relTime(unixSec: number | null): string {
+  if (unixSec == null) return "pending";
+  const diff = Date.now() / 1000 - unixSec;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86_400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86_400)}d ago`;
+}
+
 export default function Wallet() {
   const [view, setView] = useState<View>("overview");
   const [activeChat, setActiveChat] = useState<string | null>(null);
@@ -87,6 +115,7 @@ export default function Wallet() {
   const [me, setMe] = useState<{ npub: string; label: string; participant_id: number | null } | null>(null);
   const [audit, setAudit] = useState<{ entries?: AuditEntryUI[]; restricted?: boolean }>({});
   const [chainTip, setChainTip] = useState<number | null>(null);
+  const [activity, setActivity] = useState<ActivityRow[] | null>(null);
   const btcPrice = useBtcPrice();
 
   useEffect(() => {
@@ -125,6 +154,34 @@ export default function Wallet() {
     }
   }, [chats]);
 
+  // Derive the real "Recent activity" feed from the on-chain tx history of every
+  // vault receive address. Keyed on the address set (not the whole chats array)
+  // so per-address balance ticks don't trigger a refetch.
+  const vaultAddrPairs = JSON.stringify(
+    chats.filter((c) => c.receiveAddress).map((c) => [c.receiveAddress, c.name] as const),
+  );
+  useEffect(() => {
+    const pairs = JSON.parse(vaultAddrPairs) as [string, string][];
+    if (pairs.length === 0) return; // no live addresses yet → keep loading state
+    const addrToVault = new Map(pairs);
+    const addrs = pairs.map(([a]) => a).join(",");
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await fetch(`/api/chain/activity?addrs=${encodeURIComponent(addrs)}&limit=8`);
+        if (!r.ok || cancelled) return;
+        const { activity: rows } = (await r.json()) as { activity: ActivityApiEntry[] };
+        if (cancelled) return;
+        setActivity(rows.map((e) => ({ ...e, vault: addrToVault.get(e.address) ?? e.address })));
+      } catch {
+        /* esplora unreachable → leave the prior activity state in place */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [vaultAddrPairs]);
+
   const refreshAudit = useCallback(async (chatId: string) => {
     const res = await fetch(`/api/chats/${chatId}/audit`);
     if (res.status === 403) return setAudit({ restricted: true });
@@ -134,6 +191,22 @@ export default function Wallet() {
 
   const onLogout = useCallback(async () => {
     await fetch("/api/auth/logout", { method: "POST" });
+    window.location.href = "/login";
+  }, []);
+
+  // A 401 from an authenticated route means the session cookie is stale: it's
+  // *present* (so proxy.ts admitted us into the wallet) but no longer valid in
+  // the DB — an expired or reset login. The cookie is httpOnly, so JS can't
+  // clear it directly; hit logout to clear it server-side, then send the user
+  // to re-authenticate. Beats stranding them on a wallet where every action
+  // 401s behind a misleading "backend compiling" banner.
+  const handleSessionExpired = useCallback(async () => {
+    setStateError("Your session expired — taking you to sign in…");
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      /* redirect regardless of the logout result */
+    }
     window.location.href = "/login";
   }, []);
 
@@ -197,6 +270,11 @@ export default function Wallet() {
         if (meRes.ok) {
           const m = await meRes.json().catch(() => null);
           if (m) setMe({ npub: m.npub, label: m.label, participant_id: m.participant_id });
+        } else if (meRes.status === 401) {
+          // Cookie present but session invalid (proxy.ts is presence-only). Don't
+          // render a wallet where every signed action will 401 — re-authenticate.
+          if (!cancelled) void handleSessionExpired();
+          return;
         }
 
         if (stateRes.ok) {
@@ -209,21 +287,14 @@ export default function Wallet() {
             messages: [...liveVault.messages, ...(apiTreasury?.messages ?? [])],
           };
           setChats([liveChat, ...apiChats.filter((c) => c.id !== "treasury")]);
-          const live = buildLiveApproval(ws);
-          const apiTx1 = apiApprovals.find((a) => a.id === "tx1");
-          const mergedLive: Approval = apiTx1
-            ? {
-                ...live,
-                signed: Math.max(live.signed, apiTx1.signed),
-                youSigned: apiTx1.youSigned,
-                status: apiTx1.status,
-                proof: apiTx1.proof ?? live.proof,
-              }
-            : live;
-          setApprovals([mergedLive, ...apiApprovals.filter((a) => a.id !== "tx1")]);
+          // Approvals come straight from the DB — no hardcoded fixture overlay.
+          setApprovals(apiApprovals);
         } else {
           const sj = await stateRes.json().catch(() => ({}));
-          setStateError(sj.error ?? "Failed to load live vault");
+          setStateError(
+            sj.error ??
+              "Couldn't load the live vault — the DKGKit backend may still be compiling; refresh in a moment.",
+          );
           setChats(apiChats);
           setApprovals(apiApprovals);
         }
@@ -234,7 +305,7 @@ export default function Wallet() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [handleSessionExpired]);
 
   const go = (v: View) => () => {
     setView(v);
@@ -269,8 +340,13 @@ export default function Wallet() {
   const onSign = useCallback(
     async (id: string) => {
       setSigningId(id);
+      setStateError(null);
       try {
         const res = await fetch(`/api/approvals/${id}/sign`, { method: "POST" });
+        if (res.status === 401) {
+          await handleSessionExpired();
+          return;
+        }
         const json = await res.json();
         if (!res.ok) throw new Error(json.error ?? "Signing failed");
         const updated = json.approval as Approval;
@@ -294,12 +370,37 @@ export default function Wallet() {
         setSigningId(null);
       }
     },
-    [active, refreshAudit],
+    [active, refreshAudit, handleSessionExpired],
   );
   const onReject = (id: string) =>
     setApprovals((prev) => prev.map((t) => (t.id === id ? { ...t, status: "rejected" } : t)));
-  const onBroadcast = (id: string) =>
-    setApprovals((prev) => prev.map((t) => (t.id === id ? { ...t, status: "broadcast" } : t)));
+  // Broadcasting is a SEPARATE action from signing: only a `ready` transfer (quorum
+  // reached + aggregate verified) can broadcast, and it settles the real tx on-chain.
+  const onBroadcast = useCallback(
+    async (id: string) => {
+      setSigningId(id);
+      setStateError(null);
+      try {
+        const res = await fetch(`/api/approvals/${id}/broadcast`, { method: "POST" });
+        if (res.status === 401) {
+          await handleSessionExpired();
+          return;
+        }
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error ?? "Broadcast failed");
+        const updated = json.approval as Approval;
+        setApprovals((prev) =>
+          prev.map((t) => (t.id === id ? { ...t, status: "broadcast", txid: updated.txid } : t)),
+        );
+        if (active) void refreshAudit(active.id);
+      } catch (e) {
+        setStateError(e instanceof Error ? e.message : "Broadcast failed");
+      } finally {
+        setSigningId(null);
+      }
+    },
+    [active, refreshAudit, handleSessionExpired],
+  );
 
   // ---- vault policy editing ----
   const setThreshold = (chatId: string, tierId: string, delta: number) => () =>
@@ -405,6 +506,8 @@ export default function Wallet() {
       title: `Transfer · ${module}`,
       dest: destShort,
       destLabel: module,
+      recipientAddress: dest,
+      amountSats: Math.round(amt * 1e8),
       btc: amt.toFixed(2),
       usd,
       vault: chat.name,
@@ -415,6 +518,9 @@ export default function Wallet() {
       signed: 0,
       youSigned: false,
       status: "pending",
+      // A transfer out of a real DKG vault signs a live grouped HTSS round and
+      // can be broadcast on-chain. Plain DMs (no receive address) stay mock.
+      live: !!chat.receiveAddress,
     };
     const announce = `Requested a transfer — ${amt} BTC to ${destShort} on ${module}. Needs a ${policy} quorum — please review and sign in Approvals.`;
     void (async () => {
@@ -448,7 +554,6 @@ export default function Wallet() {
   const balancesPending = vaultChats.some((c) => c.receiveAddress && c.balanceBtc === "");
   const totalKeys = vaultChats.reduce((s, c) => s + c.tiers.reduce((a, t) => a + t.keys.length, 0), 0);
   const vaultCount = vaultChats.length;
-  const pendingCount = approvals.filter((t) => t.status === "pending" || t.status === "ready").length;
   const youNeed = approvals.filter((t) => !t.youSigned && t.status === "pending").length;
   const sendApprovals = approvals.filter((a) => a.kind !== "role");
   const roleApprovals = approvals.filter((a) => a.kind === "role");
@@ -533,7 +638,7 @@ export default function Wallet() {
         <div style={{ flex: 1, overflowY: "auto", padding: 30 }}>
           {stateError && (
             <div style={{ marginBottom: 18, background: "rgba(240,97,109,.08)", border: "1px solid rgba(240,97,109,.3)", color: C.red, borderRadius: 12, padding: "12px 16px", fontSize: 12.5 }}>
-              Live vault error: {stateError}. The DKGKit backend may still be compiling — refresh in a moment.
+              {stateError}
             </div>
           )}
 
@@ -544,10 +649,11 @@ export default function Wallet() {
               balanceUsd={balancesPending || btcPrice == null ? "…" : Math.round(totalBtc * btcPrice).toLocaleString("en-US")}
               vaultCount={vaultCount}
               totalKeys={totalKeys}
-              pendingCount={pendingCount}
-              primary={chats[0]}
+              youNeed={youNeed}
+              activity={activity}
+              vaultChats={vaultChats}
+              openChat={openChat}
               goApprovals={go("approvals")}
-              goPrimaryVault={openChat("treasury")}
             />
           )}
 
@@ -573,7 +679,6 @@ export default function Wallet() {
               )}
               onSign={onSign}
               signingId={signingId}
-              onCreateVault={onCreateVault}
               provisioning={provisioningId === active.id}
               showVault={showVault}
               toggleVault={toggleVault}
@@ -727,28 +832,26 @@ function Overview({
   balanceUsd,
   vaultCount,
   totalKeys,
-  pendingCount,
-  primary,
+  youNeed,
+  activity,
+  vaultChats,
+  openChat,
   goApprovals,
-  goPrimaryVault,
 }: {
   wstate: WalletState | null;
   balanceBtc: string;
   balanceUsd: string;
   vaultCount: number;
   totalKeys: number;
-  pendingCount: number;
-  primary: Chat | undefined;
+  youNeed: number;
+  activity: ActivityRow[] | null;
+  vaultChats: Chat[];
+  openChat: (id: string) => () => void;
   goApprovals: () => void;
-  goPrimaryVault: () => void;
 }) {
-  const activity = [
-    { icon: "↓", dotBg: "rgba(63,185,80,.12)", dotColor: C.green, label: "Received from exchange", meta: "Coinbase Prime · #cold-reserve", amount: "+12.50 BTC", time: "2h ago" },
-    { icon: "✎", dotBg: "rgba(247,147,26,.12)", dotColor: C.orange, label: "CEO signed — Payroll batch", meta: "#treasury-ops · 4/4", amount: "—", time: "3h ago" },
-    { icon: "↑", dotBg: "rgba(240,97,109,.12)", dotColor: C.red, label: "Sent to vendor", meta: "#treasury-ops · whitelisted", amount: "−1.10 BTC", time: "1d ago" },
-    { icon: "#", dotBg: "rgba(255,255,255,.06)", dotColor: C.muted, label: "New chat created", meta: "#ops-petty-cash · 2-of-3 vault", amount: "—", time: "2d ago" },
-  ];
-
+  const [selId, setSelId] = useState("");
+  const sel =
+    vaultChats.find((c) => c.id === selId) ?? vaultChats.find((c) => c.live) ?? vaultChats[0];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18, maxWidth: 1160 }}>
       <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: 18 }}>
@@ -769,7 +872,7 @@ function Overview({
         <div onClick={goApprovals} style={{ background: C.surface, border: "1px solid rgba(247,147,26,.3)", borderRadius: 16, padding: "22px 24px", cursor: "pointer" }}>
           <div style={{ fontSize: 12, color: C.sand, letterSpacing: ".3px" }}>AWAITING YOUR SIGNATURE</div>
           <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginTop: 10 }}>
-            <span style={{ fontFamily: MONO, fontSize: 34, fontWeight: 600, color: C.orange }}>{pendingCount}</span>
+            <span style={{ fontFamily: MONO, fontSize: 34, fontWeight: 600, color: C.orange }}>{youNeed}</span>
             <span style={{ fontSize: 14, color: C.faint2 }}>transactions</span>
           </div>
           <div style={{ display: "inline-flex", alignItems: "center", gap: 7, marginTop: 16, background: C.orange, color: C.bg, fontSize: 12.5, fontWeight: 600, padding: "7px 12px", borderRadius: 8 }}>Review approvals →</div>
@@ -781,42 +884,95 @@ function Overview({
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
         <div style={{ background: C.surface, border: `1px solid ${C.line2}`, borderRadius: 16, padding: "6px 4px" }}>
           <div style={{ fontSize: 13, fontWeight: 600, padding: "16px 20px 12px" }}>Recent activity</div>
-          {activity.map((a, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 13, padding: "11px 20px", borderTop: "1px solid rgba(255,255,255,.05)" }}>
-              <span style={{ width: 32, height: 32, borderRadius: 9, background: a.dotBg, color: a.dotColor, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, flex: "0 0 32px" }}>{a.icon}</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 500 }}>{a.label}</div>
-                <div style={{ fontSize: 11.5, color: C.faint2 }}>{a.meta}</div>
-              </div>
-              <div style={{ fontFamily: MONO, fontSize: 12.5, color: "#9CA1A7", textAlign: "right" }}>
-                {a.amount}
-                <div style={{ fontSize: 10.5, color: C.faint }}>{a.time}</div>
-              </div>
-            </div>
-          ))}
+          {activity == null ? (
+            <div style={{ fontSize: 12, color: C.faint, padding: "8px 20px 16px" }}>Loading on-chain activity…</div>
+          ) : activity.length === 0 ? (
+            <div style={{ fontSize: 12, color: C.faint, padding: "8px 20px 16px" }}>No on-chain activity yet.</div>
+          ) : (
+            activity.map((a) => {
+              const inbound = a.direction === "in";
+              return (
+                <div key={`${a.txid}:${a.address}`} style={{ display: "flex", alignItems: "center", gap: 13, padding: "11px 20px", borderTop: "1px solid rgba(255,255,255,.05)" }}>
+                  <span style={{ width: 32, height: 32, borderRadius: 9, background: inbound ? "rgba(63,185,80,.12)" : "rgba(240,97,109,.12)", color: inbound ? C.green : C.red, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, flex: "0 0 32px" }}>{inbound ? "↓" : "↑"}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500 }}>{inbound ? "Receive" : "Send"}</div>
+                    <div style={{ fontSize: 11.5, color: C.faint2, fontFamily: MONO }}>
+                      {a.vault} · {a.txid.slice(0, 8)}…{!a.confirmed && " · pending"}
+                    </div>
+                  </div>
+                  <div style={{ fontFamily: MONO, fontSize: 12.5, color: inbound ? C.green : C.red, textAlign: "right" }}>
+                    {inbound ? "+" : "−"}{fmtBtc(a.deltaSats)} BTC
+                    <div style={{ fontSize: 10.5, color: C.faint }}>{relTime(a.blockTime)}</div>
+                  </div>
+                  <a
+                    href={a.txUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="View transaction on block explorer"
+                    style={{ flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "center", width: 28, height: 28, borderRadius: 8, border: `1px solid ${C.line2}`, color: C.faint2, textDecoration: "none", fontSize: 13 }}
+                  >
+                    ↗
+                  </a>
+                </div>
+              );
+            })
+          )}
         </div>
         <div style={{ background: C.surface, border: `1px solid ${C.line2}`, borderRadius: 16, padding: "20px 22px", display: "flex", flexDirection: "column" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <div style={{ fontSize: 13, fontWeight: 600 }}>{primary?.name ?? "#treasury-ops"} quorum</div>
-            <button onClick={goPrimaryVault} style={{ background: "transparent", border: `1px solid ${C.line2}`, color: "#C5C9CE", fontSize: 11.5, fontFamily: "inherit", padding: "5px 11px", borderRadius: 7, cursor: "pointer" }}>Open chat &amp; vault</button>
-          </div>
-          <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 11 }}>
-            {(primary?.tiers ?? []).map((t, i) => (
-              <div key={t.id}>
-                {i > 0 && <div style={{ display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: C.faint, letterSpacing: 1, margin: "11px 0" }}>AND</div>}
-                <div style={{ display: "flex", alignItems: "center", gap: 13, background: C.surface2, border: `1px solid ${C.line}`, borderRadius: 11, padding: "13px 15px" }}>
-                  <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 600, color: C.orange, background: C.orangeSoft, padding: "4px 9px", borderRadius: 7 }}>{clampNeed(t)} / {t.keys.length}</span>
-                  <div>
-                    <div style={{ fontSize: 13, fontWeight: 500 }}>{t.name}</div>
-                    <div style={{ fontSize: 11.5, color: C.faint2 }}>{t.keys.map((k) => k.name.split(" ")[0]).join(" · ")}</div>
-                  </div>
-                </div>
+          {!sel ? (
+            <div style={{ fontSize: 12.5, color: C.faint2 }}>No vaults yet.</div>
+          ) : (
+            <>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                <select
+                  value={sel.id}
+                  onChange={(e) => setSelId(e.target.value)}
+                  style={{ background: C.surface2, border: `1px solid ${C.line2}`, color: C.ink, borderRadius: 8, padding: "6px 10px", fontSize: 13, fontWeight: 600, fontFamily: "inherit", cursor: "pointer", outline: "none", maxWidth: "60%" }}
+                  title="Switch vault"
+                >
+                  {vaultChats.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                <button onClick={openChat(sel.id)} style={{ flex: "0 0 auto", background: "transparent", border: `1px solid ${C.line2}`, color: "#C5C9CE", fontSize: 11.5, fontFamily: "inherit", padding: "5px 11px", borderRadius: 7, cursor: "pointer" }}>Open chat &amp; vault</button>
               </div>
-            ))}
-          </div>
-          <div style={{ marginTop: "auto", paddingTop: 16, fontSize: 11.5, color: C.faint2, lineHeight: 1.5 }}>
-            Every spend needs a quorum from <span style={{ color: "#C5C9CE" }}>each</span> tier. Edit the policy inside the chat.
-          </div>
+
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, marginTop: 16 }}>
+                <span style={{ fontFamily: MONO, fontSize: 24, fontWeight: 600, letterSpacing: "-.5px" }}>
+                  {sel.balanceBtc === "" ? "…" : sel.balanceBtc}
+                  <span style={{ fontSize: 13, color: C.orange, fontWeight: 600 }}> BTC</span>
+                </span>
+                {sel.tiers.length > 0 && (
+                  <span style={{ fontFamily: MONO, fontSize: 12, color: C.faint2, textAlign: "right" }}>{quorumOf(sel.tiers)}</span>
+                )}
+              </div>
+
+              <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 11 }}>
+                {sel.tiers.length === 0 ? (
+                  <div style={{ fontSize: 11.5, color: C.faint2 }}>No signing tiers configured for this vault.</div>
+                ) : (
+                  sel.tiers.map((t, i) => (
+                    <div key={t.id}>
+                      {i > 0 && <div style={{ display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: C.faint, letterSpacing: 1, margin: "11px 0" }}>AND</div>}
+                      <div style={{ display: "flex", alignItems: "center", gap: 13, background: C.surface2, border: `1px solid ${C.line}`, borderRadius: 11, padding: "13px 15px" }}>
+                        <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 600, color: C.orange, background: C.orangeSoft, padding: "4px 9px", borderRadius: 7 }}>{clampNeed(t)} / {t.keys.length}</span>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 500 }}>{t.name}</div>
+                          <div style={{ fontSize: 11.5, color: C.faint2 }}>{t.keys.map((k) => k.name.split(" ")[0]).join(" · ")}</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div style={{ marginTop: "auto", paddingTop: 16, fontSize: 11.5, color: C.faint2, lineHeight: 1.5 }}>
+                Every spend needs a quorum from <span style={{ color: "#C5C9CE" }}>each</span> tier. Edit the policy inside the chat.
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -924,7 +1080,6 @@ function ChatDetail({
   pendingApprovals,
   onSign,
   signingId,
-  onCreateVault,
   provisioning,
   showVault,
   toggleVault,
@@ -943,7 +1098,6 @@ function ChatDetail({
   pendingApprovals: Approval[];
   onSign: (id: string) => void;
   signingId: string | null;
-  onCreateVault: (chatId: string) => void;
   provisioning: boolean;
   showVault: boolean;
   toggleVault: () => void;
@@ -965,15 +1119,24 @@ function ChatDetail({
     <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 126px)", gap: 14 }}>
       <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 14 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 9 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
             {chat.name}
             {chat.live && <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: ".4px", color: C.green, background: "rgba(63,185,80,.12)", padding: "2px 7px", borderRadius: 20 }}>LIVE</span>}
+            {chat.receiveAddress && <AddressChip address={chat.receiveAddress} />}
           </div>
           <div style={{ fontSize: 11.5, color: C.faint2, display: "flex", alignItems: "center", gap: 7, marginTop: 2 }}>
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }} />
             {isDirect ? "Direct message" : "Channel"} · {chat.members} members
-            {hasVault ? (chat.balanceBtc === "" ? " · syncing…" : ` · ${chat.balanceBtc} BTC`) : ""}
           </div>
+          {hasVault &&
+            (chat.receiveAddress ? (
+              <VaultBalance address={chat.receiveAddress} />
+            ) : (
+              <div style={{ marginTop: 8, fontSize: 11.5, color: C.sand, display: "flex", alignItems: "center", gap: 7 }}>
+                <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.sand }} />
+                {provisioning || chat.vaultStatus === "pending" ? "Provisioning vault… running DKG" : "Address provisioning…"}
+              </div>
+            ))}
         </div>
         {hasVault && (
           <button onClick={toggleVault} style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 8, background: C.surface2, border: `1px solid ${showVault ? C.orange : "rgba(255,255,255,.1)"}`, color: showVault ? C.orange : "#C5C9CE", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", whiteSpace: "nowrap", padding: "9px 14px", borderRadius: 9, cursor: "pointer" }}>
@@ -1050,7 +1213,6 @@ function ChatDetail({
         )}
         {!isDirect && (
           <div style={{ flex: "0 0 296px", display: "flex", flexDirection: "column", gap: 14, minHeight: 0 }}>
-            <VaultCard chat={chat} isDirect={isDirect} provisioning={provisioning} onCreateVault={onCreateVault} />
             <OngoingProposals proposals={pendingApprovals} onSign={onSign} signingId={signingId} />
             <AuditPanel audit={audit} />
           </div>
@@ -1061,104 +1223,83 @@ function ChatDetail({
 }
 
 // ===========================================================================
-// Vault card — per-chat address / pending / create-vault state
+// Address chip — compact receive address with copy, shown in the chat header
 // ===========================================================================
 
-function VaultCard({
-  chat,
-  isDirect,
-  provisioning,
-  onCreateVault,
-}: {
-  chat: Chat;
-  isDirect: boolean;
-  provisioning: boolean;
-  onCreateVault: (chatId: string) => void;
-}) {
-  const status: "none" | "pending" | "active" = provisioning
-    ? "pending"
-    : (chat.vaultStatus ?? (chat.tiers.length > 0 ? "active" : "none"));
+function AddressChip({ address }: { address: string }) {
+  const [copied, setCopied] = useState(false);
+  const short = `${address.slice(0, 8)}…${address.slice(-5)}`;
+  const copy = () => {
+    navigator.clipboard?.writeText(address).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      },
+      () => {},
+    );
+  };
+  return (
+    <button
+      onClick={copy}
+      title={copied ? "Copied" : `Copy ${address}`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        background: C.surface2,
+        border: `1px solid ${copied ? "rgba(63,185,80,.4)" : C.line2}`,
+        color: copied ? C.green : "#9CA1A7",
+        fontFamily: MONO,
+        fontSize: 11.5,
+        fontWeight: 500,
+        padding: "3px 9px",
+        borderRadius: 7,
+        cursor: "pointer",
+      }}
+    >
+      {copied ? "Copied" : short}
+      <span aria-hidden style={{ fontSize: 12 }}>
+        {copied ? "✓" : "⧉"}
+      </span>
+    </button>
+  );
+}
 
+// ===========================================================================
+// Vault balance — live on-chain balance for the receive address, shown in the
+// chat header right under the address (no separate "Shared vault" card).
+// ===========================================================================
+
+function VaultBalance({ address }: { address: string }) {
   const [chain, setChain] = useState<{ totalSats: number; confirmedSats: number; mempoolSats: number } | null>(null);
   const [chainErr, setChainErr] = useState(false);
   useEffect(() => {
-    if (status !== "active" || !chat.receiveAddress) return;
     let cancelled = false;
     setChain(null);
     setChainErr(false);
-    fetch(`/api/chain/address/${chat.receiveAddress}`)
+    fetch(`/api/chain/address/${address}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error("chain"))))
       .then((d) => !cancelled && setChain(d))
       .catch(() => !cancelled && setChainErr(true));
     return () => {
       cancelled = true;
     };
-  }, [status, chat.receiveAddress]);
+  }, [address]);
 
   return (
-    <aside style={{ flex: "0 0 auto", background: C.surface, border: `1px solid ${C.line2}`, borderRadius: 16, padding: 16 }}>
-      <div style={{ fontSize: 13, fontWeight: 600 }}>Shared vault</div>
-
-      {status === "none" && (
-        <>
-          <div style={{ fontSize: 11.5, color: C.faint2, marginTop: 6, lineHeight: 1.5 }}>
-            {isDirect
-              ? "This is a direct chat. Create a 2-of-2 vault to hold and spend bitcoin together."
-              : "No shared vault yet."}
-          </div>
-          {isDirect && (
-            <button
-              onClick={() => onCreateVault(chat.id)}
-              style={{ width: "100%", marginTop: 12, background: C.orange, border: "none", color: C.bg, fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", padding: "9px 12px", borderRadius: 8, cursor: "pointer" }}
-            >
-              Create 2-of-2 vault
-            </button>
-          )}
-        </>
-      )}
-
-      {status === "pending" && (
-        <div style={{ fontSize: 11.5, color: C.sand, marginTop: 8, display: "flex", alignItems: "center", gap: 7 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.sand }} />
-          Provisioning vault… running DKG
-        </div>
-      )}
-
-      {status === "active" && (
-        <>
-          <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px", marginTop: 10 }}>Receive address</div>
-          {chat.receiveAddress ? (
-            <div style={{ fontFamily: MONO, fontSize: 11.5, color: "#C5C9CE", marginTop: 4, wordBreak: "break-all" }}>
-              {chat.receiveAddress}
-            </div>
-          ) : (
-            <div style={{ fontSize: 11.5, color: C.sand, marginTop: 4 }}>Address provisioning…</div>
-          )}
-          {chat.receiveAddress && (
-            <>
-              <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px", marginTop: 12 }}>
-                On-chain balance · regtest
-              </div>
-              <div style={{ fontFamily: MONO, fontSize: 13, color: chain && chain.totalSats > 0 ? C.green : "#C5C9CE", marginTop: 3 }}>
-                {chain
-                  ? `${(chain.totalSats / 1e8).toFixed(8)} BTC`
-                  : chainErr
-                    ? "—"
-                    : "checking…"}
-                {chain && chain.mempoolSats > 0 && (
-                  <span style={{ color: C.sand }}> ({(chain.mempoolSats / 1e8).toFixed(8)} pending)</span>
-                )}
-              </div>
-            </>
-          )}
-          {chat.tiers.length > 0 && (
-            <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint2, marginTop: 10 }}>
-              {quorumOf(chat.tiers)} quorum
-            </div>
-          )}
-        </>
-      )}
-    </aside>
+    <div style={{ marginTop: 8 }}>
+      <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px" }}>On-chain balance · regtest</div>
+      <div style={{ fontFamily: MONO, fontSize: 20, fontWeight: 600, color: chain && chain.totalSats > 0 ? C.green : "#C5C9CE", marginTop: 2 }}>
+        {chain
+          ? `${(chain.totalSats / 1e8).toFixed(8)} BTC`
+          : chainErr
+            ? "—"
+            : "checking…"}
+        {chain && chain.mempoolSats > 0 && (
+          <span style={{ color: C.sand, fontSize: 12, fontWeight: 400 }}> ({(chain.mempoolSats / 1e8).toFixed(8)} pending)</span>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1250,17 +1391,19 @@ function AuditPanel({ audit }: { audit: { entries?: AuditEntryUI[]; restricted?:
   return (
     <aside
       style={{
-        flex: "0 0 296px",
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
         background: C.surface,
         border: `1px solid ${C.line2}`,
         borderRadius: 16,
         padding: 16,
-        overflowY: "auto",
-        minHeight: 0,
+        overflow: "hidden",
       }}
     >
-      <div style={{ fontSize: 13, fontWeight: 600 }}>Audit log</div>
-      <div style={{ fontSize: 10.5, color: C.faint, marginTop: 2, marginBottom: 14 }}>
+      <div style={{ flex: "0 0 auto", fontSize: 13, fontWeight: 600 }}>Audit log</div>
+      <div style={{ flex: "0 0 auto", fontSize: 10.5, color: C.faint, marginTop: 2, marginBottom: 14 }}>
         Visible to vault members only
       </div>
 
@@ -1271,7 +1414,7 @@ function AuditPanel({ audit }: { audit: { entries?: AuditEntryUI[]; restricted?:
       ) : !audit.entries || audit.entries.length === 0 ? (
         <div style={{ fontSize: 11.5, color: C.faint2 }}>No activity recorded yet.</div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12 }}>
           {audit.entries.map((e) => (
             <div key={e.id} style={{ display: "flex", gap: 9, fontSize: 11.5 }}>
               <span
@@ -1424,9 +1567,9 @@ function Stepper({ onClick, title, children }: { onClick: () => void; title: str
 
 function Plan() {
   const plans = [
-    { name: "Starter", nameColor: C.ink, price: "$0", per: "/mo", tagline: "One chat and vault for small teams getting off the exchange.", bg: C.surface, border: C.line2, featured: false, features: ["1 chat · up to 3 keys", "2-of-3 single-tier quorum", "Nostr team chat", "Email support"], cta: "Downgrade", btnBg: "transparent", btnColor: "#C5C9CE", btnBorder: "1px solid rgba(255,255,255,.14)" },
-    { name: "Business", nameColor: C.orange, price: "$499", per: "/mo", tagline: "Unlimited chats with hierarchical vaults for operating treasuries.", bg: "#15120C", border: "rgba(247,147,26,.4)", featured: true, features: ["Unlimited chats · up to 15 keys each", "Multi-tier hierarchical signatures", "Nostr team chat & proposals", "Audit log & SSO", "Priority signing support"], cta: "Current plan", btnBg: C.orange, btnColor: C.bg, btnBorder: "none" },
-    { name: "Enterprise", nameColor: C.ink, price: "Custom", per: "", tagline: "Dedicated infrastructure, SLAs and white-glove key ceremonies.", bg: C.surface, border: C.line2, featured: false, features: ["Unlimited keys & tiers", "On-site key ceremony", "Dedicated infra + 24/7 SLA", "Self-hosted Nostr relays", "Named solutions engineer"], cta: "Contact sales", btnBg: "transparent", btnColor: "#C5C9CE", btnBorder: "1px solid rgba(255,255,255,.14)" },
+    { name: "Open Source", nameColor: C.ink, price: "Free", per: "· self-hosted", tagline: "The full stack, open source. Every feature unlocked — you run it on your own infra.", bg: C.surface, border: C.line2, featured: false, features: ["Unlimited chats, vaults & keys", "All hierarchical quorum tiers", "Self-host Nostr relays & vaultd", "Full on-chain audit log", "Community support"], cta: "View source", btnBg: "transparent", btnColor: "#C5C9CE", btnBorder: "1px solid rgba(255,255,255,.14)" },
+    { name: "Business", nameColor: C.orange, price: "$499", per: "/mo", tagline: "Fully managed hosting — we run the relays and signing infra so your team doesn't have to.", bg: "#15120C", border: "rgba(247,147,26,.4)", featured: true, features: ["Up to 10 team chats", "Up to 3 signing groups per vault", "Managed Nostr relays & vaultd", "Audit log & SSO", "Priority signing support"], cta: "Current plan", btnBg: C.orange, btnColor: C.bg, btnBorder: "none" },
+    { name: "Enterprise", nameColor: C.ink, price: "Contact us", per: "", tagline: "Deal-based pricing for large treasuries. Scoped to your security and scale.", bg: C.surface, border: C.line2, featured: false, features: ["Unlimited chats & groups", "Dedicated infra + 24/7 SLA", "On-site key ceremony", "Self-hosted or managed", "Named solutions engineer"], cta: "Contact sales", btnBg: "transparent", btnColor: "#C5C9CE", btnBorder: "1px solid rgba(255,255,255,.14)" },
   ];
   return (
     <div style={{ maxWidth: 1080 }}>
@@ -1436,7 +1579,7 @@ function Plan() {
             {pl.featured && <span style={{ position: "absolute", top: 18, right: 20, fontSize: 10.5, fontWeight: 600, color: C.bg, background: C.orange, padding: "3px 10px", borderRadius: 20 }}>CURRENT</span>}
             <div style={{ fontSize: 14, fontWeight: 600, color: pl.nameColor }}>{pl.name}</div>
             <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 14 }}>
-              <span style={{ fontFamily: MONO, fontSize: 32, fontWeight: 600 }}>{pl.price}</span>
+              <span style={{ fontFamily: MONO, fontSize: pl.price.startsWith("$") ? 32 : 22, fontWeight: 600, whiteSpace: "nowrap" }}>{pl.price}</span>
               <span style={{ fontSize: 13, color: C.faint2 }}>{pl.per}</span>
             </div>
             <div style={{ fontSize: 12.5, color: C.muted, marginTop: 6, lineHeight: 1.5 }}>{pl.tagline}</div>

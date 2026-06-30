@@ -71,12 +71,18 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
   const count = (
     db.prepare("SELECT COUNT(*) c FROM approval_signatures WHERE approval_id = ?").get(id) as { c: number }
   ).c;
+  // A live grouped HTSS round produces ONE verified aggregate that already
+  // represents the full valid quorum (proof.signers), so a successful live sign
+  // satisfies the threshold — the Broadcast button only appears once that
+  // aggregate signature verifies.
+  const quorum = proof?.verified ? proof.signers.length : 0;
+  const signed = Math.max(approval.signed ?? 0, count, quorum);
   const updated: Approval = {
     ...approval,
-    signed: Math.max(approval.signed ?? 0, count),
+    signed,
     youSigned: true,
     proof: proof ?? approval.proof,
-    status: count >= approval.threshold ? "ready" : approval.status,
+    status: signed >= approval.threshold ? "ready" : approval.status,
   };
   db.prepare("UPDATE approvals SET data_json = ?, status = ? WHERE id = ?")
     .run(JSON.stringify(updated), updated.status, id);
