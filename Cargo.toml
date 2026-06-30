@@ -6,6 +6,7 @@ rust-version = "1.76"
 
 [dependencies]
 anyhow = "1"
+bitcoin = "0.32"
 dkgkit-nostr = { path = "../dkgkit/crates/dkgkit-nostr", features = ["live"] }
 dkgkit-sdk = { path = "../dkgkit/crates/dkgkit-sdk" }
 hex = "0.4"
