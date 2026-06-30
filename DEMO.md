@@ -18,7 +18,7 @@ docker compose -f ../dkgkit/examples/self-hosted-relay/docker-compose.yml up -d 
 cd ~/project/btech && cargo build && ./target/debug/vaultd                          # http://127.0.0.1:8787
 # 3. arkd regtest stack up (for the stealth beat). Console:
 PORT=3030 bun run dev                                                                # :3030
-open http://localhost:3030      # log in with a one-tap demo persona (or paste an nsec)
+open http://localhost:3030      # the "Savara" console — tap a demo persona (Alice·Founder, …) or paste an nsec
 # 4. keep a second terminal in the SDK repo for the stealth beat:
 cd ~/project/hackathon/arkade-ts-sdk
 ```
@@ -60,10 +60,15 @@ Open a channel → **TREASURY VAULT** (a *Live DKGKit vault*).
 
 ## 4 · Channels + audit (1:25–1:40)
 
-- **CHANNELS** sidebar: each channel is a members-only room mapped to a vault; DMs
-  are **NIP-44 encrypted** over a self-hosted **Nostr relay**.
-- **Audit log**: every propose / sign / message is recorded per channel and visible
-  **only to members** — outsiders are denied.
+- **CHANNELS** sidebar (`#treasury-ops`, `#cold-reserve`, `#ops-petty-cash`) + a
+  **DIRECT** message with Bob. Each channel is a members-only room mapped to a vault.
+- Open **#treasury-ops**: the header carries the channel's **LIVE** on-chain
+  receive address **and** its **STEALTH `tsp1…`** address side by side. Type `/send`
+  (or tap ₿) to propose a transfer — "Signed with your Nostr key and relayed over
+  Nostr." **🔒** messages are **NIP-44 encrypted**.
+- **Audit log** (right rail, *"Visible to vault members only"*): every propose /
+  sign / message, e.g. `Alice signed ✓ SUCCESS · signed 1/7`,
+  `quorum reached 6/6 — live HTSS aggregate verified`, `Broadcast 6.0 BTC … tx 141b7d20…`.
 
 ## 5 · Stealth receiving — silent payments, L1 + Arkade (1:40–2:00)
 
