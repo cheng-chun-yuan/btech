@@ -14,7 +14,10 @@ export async function POST(req: Request) {
   const user = getSessionUser(db, (await cookies()).get(SESSION_COOKIE)?.value);
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = (await req.json()) as { events?: SubledgerEvent[] };
-  const results = ingestEvents(db, body.events ?? []);
+  const body = (await req.json().catch(() => ({}))) as { events?: unknown };
+  if (!Array.isArray(body.events)) {
+    return NextResponse.json({ error: "events must be an array" }, { status: 400 });
+  }
+  const results = ingestEvents(db, body.events as SubledgerEvent[]);
   return NextResponse.json({ results });
 }

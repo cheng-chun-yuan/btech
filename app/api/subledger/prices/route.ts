@@ -14,7 +14,10 @@ export async function POST(req: Request) {
   const user = getSessionUser(db, (await cookies()).get(SESSION_COOKIE)?.value);
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = (await req.json()) as { prices?: PricePoint[] };
-  const count = seedPrices(db, body.prices ?? []);
+  const body = (await req.json().catch(() => ({}))) as { prices?: unknown };
+  if (!Array.isArray(body.prices)) {
+    return NextResponse.json({ error: "prices must be an array" }, { status: 400 });
+  }
+  const count = seedPrices(db, body.prices as PricePoint[]);
   return NextResponse.json({ count });
 }

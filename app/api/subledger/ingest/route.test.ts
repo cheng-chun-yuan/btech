@@ -34,4 +34,15 @@ describe("POST /api/subledger/ingest", () => {
     h.token = undefined;
     expect((await POST(req())).status).toBe(401);
   });
+
+  it("returns 400 when events is not an array", async () => {
+    h.token = TEST_TOKEN;
+    const res = await POST(
+      new Request("http://x/api/subledger/ingest", {
+        method: "POST",
+        body: JSON.stringify({ events: 5 }),
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
 });

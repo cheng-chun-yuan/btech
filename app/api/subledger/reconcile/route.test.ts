@@ -38,4 +38,27 @@ describe("POST /api/subledger/reconcile", () => {
     h.token = undefined;
     expect((await POST(req())).status).toBe(401);
   });
+
+  it("returns 400 when period is missing (authenticated)", async () => {
+    h.token = TEST_TOKEN;
+    const res = await POST(
+      new Request("http://x/api/subledger/reconcile", {
+        method: "POST",
+        body: JSON.stringify({ chainBalances: {} }),
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 on malformed JSON body (authenticated)", async () => {
+    h.token = TEST_TOKEN;
+    const res = await POST(
+      new Request("http://x/api/subledger/reconcile", {
+        method: "POST",
+        body: "not json",
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
 });

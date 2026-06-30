@@ -13,8 +13,17 @@ export async function POST(req: Request) {
   const user = getSessionUser(db, (await cookies()).get(SESSION_COOKIE)?.value);
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = (await req.json()) as { period?: string; chainBalances?: Record<string, string> };
-  if (!body.period) return NextResponse.json({ error: "period is required" }, { status: 400 });
-  const data = runPeriodReconcile(db, body.period, body.chainBalances ?? {});
+  const body = (await req.json().catch(() => ({}))) as {
+    period?: unknown;
+    chainBalances?: unknown;
+  };
+  if (typeof body.period !== "string" || !body.period) {
+    return NextResponse.json({ error: "period is required" }, { status: 400 });
+  }
+  const chainBalances =
+    body.chainBalances && typeof body.chainBalances === "object"
+      ? (body.chainBalances as Record<string, string>)
+      : {};
+  const data = runPeriodReconcile(db, body.period, chainBalances);
   return NextResponse.json({ data });
 }

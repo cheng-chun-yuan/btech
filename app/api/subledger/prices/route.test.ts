@@ -29,4 +29,15 @@ describe("POST /api/subledger/prices", () => {
     const res = await POST(req());
     expect(res.status).toBe(401);
   });
+
+  it("returns 400 when prices is not an array", async () => {
+    h.token = TEST_TOKEN;
+    const res = await POST(
+      new Request("http://x/api/subledger/prices", {
+        method: "POST",
+        body: JSON.stringify({ prices: 5 }),
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
 });
