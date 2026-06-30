@@ -4,7 +4,7 @@ import type { SelectedSigner } from "../../ui/wallet/types";
 
 /** Canonical policy-valid minimal set for the (1,2,3)-of-(2,3,5) vault:
  * 1 C-level + 2 managers + 3 operators. */
-export const DEFAULT_VALID_PARTICIPANT_IDS = [1, 3, 4, 6, 7, 8];
+export const DEFAULT_VALID_PARTICIPANT_IDS = Object.freeze([1, 3, 4, 6, 7, 8]) as readonly number[];
 
 /** Resolve picked npubs to a signer set. Every npub must be a registered signer
  * (a row in `signers`); otherwise this throws. Order follows participant id. */

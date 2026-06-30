@@ -21,6 +21,11 @@ function seedRoster(db: ReturnType<typeof openTestDb>) {
 }
 
 describe("governance", () => {
+  it("defaultSignerSet returns [] when no roster exists", () => {
+    const db = openTestDb(); // no seedRoster
+    expect(defaultSignerSet(db)).toEqual([]);
+  });
+
   it("defaultSignerSet returns the canonical policy-valid set", () => {
     const db = openTestDb();
     seedRoster(db);
