@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { openTestDb } from "./db";
 import { policyConfigToWire } from "./btech";
+import { isBrickedPolicy } from "../approvals/policy-validate";
 
 describe("reshare schema", () => {
   it("schema version is at least 9", () => {
@@ -43,5 +44,38 @@ describe("policyConfigToWire", () => {
       { rank: 0, required: 1, total: 2 },
       { rank: 2, required: 3, total: 1 },
     ]);
+  });
+});
+
+describe("isBrickedPolicy", () => {
+  it("flags a tier requiring more signers than it has", () => {
+    expect(
+      isBrickedPolicy({
+        tiers: [
+          {
+            id: "t",
+            name: "Ops",
+            rank: 2,
+            required: 3,
+            signers: [{ participantId: 6, npub: "n", label: "O", rank: 2 }],
+          },
+        ],
+      }),
+    ).toBe(true);
+  });
+  it("accepts a satisfiable policy (1-of-1 is allowed)", () => {
+    expect(
+      isBrickedPolicy({
+        tiers: [
+          {
+            id: "t",
+            name: "Solo",
+            rank: 0,
+            required: 1,
+            signers: [{ participantId: 1, npub: "n", label: "A", rank: 0 }],
+          },
+        ],
+      }),
+    ).toBe(false);
   });
 });
