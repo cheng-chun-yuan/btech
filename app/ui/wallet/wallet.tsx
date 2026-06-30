@@ -152,6 +152,9 @@ export default function Wallet() {
   } | null>(null);
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [audit, setAudit] = useState<{ entries?: AuditEntryUI[]; restricted?: boolean }>({});
+  const [members, setMembers] = useState<
+    { npub: string; label: string; role: string; initials: string; color: string }[]
+  >([]);
   const [chainTip, setChainTip] = useState<number | null>(null);
   const [activity, setActivity] = useState<ActivityRow[] | null>(null);
   const btcPrice = useBtcPrice();
@@ -395,6 +398,27 @@ export default function Wallet() {
     }
     void refreshAudit(active.id);
   }, [view, active, refreshAudit]);
+
+  // Load members roster when the active chat changes.
+  useEffect(() => {
+    if (!active) {
+      setMembers([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const res = await fetch(`/api/chats/${active.id}/members`);
+      if (!res.ok) {
+        if (!cancelled) setMembers([]);
+        return;
+      }
+      const { members: rows } = (await res.json()) as { members: typeof members };
+      if (!cancelled) setMembers(rows);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [active?.id]);
 
   // ---- approval actions ----
   // All signing is persisted server-side. For live approvals the route runs a
@@ -783,6 +807,10 @@ export default function Wallet() {
               onAuthorClick={(m) =>
                 m.authorNpub &&
                 setPopover({ npub: m.authorNpub, name: m.who, initials: m.initials, color: m.color })
+              }
+              members={members}
+              onMemberClick={(mem) =>
+                setPopover({ npub: mem.npub, name: mem.label, initials: mem.initials, color: mem.color, role: mem.role })
               }
             />
           )}
@@ -1257,6 +1285,8 @@ function ChatDetail({
   removeKey,
   proposeKey,
   onAuthorClick,
+  members,
+  onMemberClick,
 }: {
   chat: Chat;
   audit: { entries?: AuditEntryUI[]; restricted?: boolean };
@@ -1277,6 +1307,8 @@ function ChatDetail({
   removeKey: (chatId: string, tierId: string, keyId: string) => () => void;
   proposeKey: (chatId: string, tierId: string) => () => void;
   onAuthorClick: (m: ChatMessage) => void;
+  members: { npub: string; label: string; role: string; initials: string; color: string }[];
+  onMemberClick: (m: { npub: string; label: string; role: string; initials: string; color: string }) => void;
 }) {
   const quorum = quorumOf(chat.tiers);
   const hasVault = !!chat.vaultStatus || chat.tiers.length > 0;
@@ -1388,12 +1420,32 @@ function ChatDetail({
         {showVault && hasVault && (
           <VaultPanel chat={chat} setThreshold={setThreshold} removeKey={removeKey} proposeKey={proposeKey} />
         )}
-        {!isDirect && (
-          <div style={{ flex: "0 0 296px", display: "flex", flexDirection: "column", gap: 14, minHeight: 0 }}>
-            <OngoingProposals proposals={pendingApprovals} onSign={onSign} signingId={signingId} />
-            <AuditPanel audit={audit} />
+        <div style={{ flex: "0 0 296px", display: "flex", flexDirection: "column", gap: 14, minHeight: 0 }}>
+          <div style={{ background: "#15181C", border: "1px solid #2A2F36", borderRadius: 12, padding: 12 }}>
+            <div style={{ fontSize: 10, color: "#5E6369", letterSpacing: ".5px", marginBottom: 8 }}>
+              MEMBERS · {members.length}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {members.map((mem) => (
+                <button
+                  key={mem.npub}
+                  type="button"
+                  onClick={() => onMemberClick(mem)}
+                  style={{ display: "flex", alignItems: "center", gap: 9, background: "none", border: "none", padding: "5px 6px", borderRadius: 8, cursor: "pointer", textAlign: "left", color: "inherit" }}
+                >
+                  <span style={{ width: 24, height: 24, borderRadius: 7, background: mem.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#0E1013", flex: "0 0 24px" }}>{mem.initials}</span>
+                  <span style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{mem.label}</span>
+                </button>
+              ))}
+            </div>
           </div>
-        )}
+          {!isDirect && (
+            <>
+              <OngoingProposals proposals={pendingApprovals} onSign={onSign} signingId={signingId} />
+              <AuditPanel audit={audit} />
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
