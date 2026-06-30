@@ -916,8 +916,6 @@ Then in the `approval` literal, set the signer set and derive the threshold from
 ```ts
   const approval: Approval = {
     kind: "send",
-    threshold: signerSet ? signerSet.length : 1,
-    total: signerSet ? signerSet.length : 1,
     signed: 0,
     youSigned: false,
     status: "pending",
@@ -928,6 +926,8 @@ Then in the `approval` literal, set the signer set and derive the threshold from
     title: body.title,
     vault: body.vault,
     signerSet,
+    // signerSet (when present) is the quorum, so it sets threshold/total; these
+    // sit AFTER ...body so they win over whatever the client sent.
     threshold: signerSet ? signerSet.length : (body.threshold ?? 1),
     total: signerSet ? signerSet.length : (body.total ?? 1),
   } as Approval;
