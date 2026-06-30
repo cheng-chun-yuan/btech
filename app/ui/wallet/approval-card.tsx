@@ -38,7 +38,7 @@ function hintFor(a: Approval): string {
     return `${left} more signature${left > 1 ? "s" : ""} needed to reach quorum.`;
   }
   if (a.status === "ready") return isRole ? "Quorum reached. Ready to apply." : "Quorum reached. Ready to broadcast.";
-  if (a.status === "broadcast") return isRole ? "Change applied to the vault policy." : "Submitted to the Bitcoin network.";
+  if (a.status === "broadcast") return isRole ? "Policy reshared — group key and address unchanged." : "Submitted to the Bitcoin network.";
   return isRole ? "This change was rejected." : "This transaction was rejected and will not be broadcast.";
 }
 
@@ -98,6 +98,15 @@ export function ApprovalCard({
           </div>
         ))}
       </div>
+
+      {appr.policyDiff && appr.policyDiff.length > 0 && (
+        <div style={{ marginTop: 14, background: "#0E1014", border: "1px solid rgba(255,255,255,.08)", borderRadius: 12, padding: "11px 14px" }}>
+          <div style={{ fontSize: 10.5, color: "#7C828A", letterSpacing: ".3px", marginBottom: 6 }}>PROPOSED POLICY CHANGE</div>
+          {appr.policyDiff.map((d, i) => (
+            <div key={i} style={{ fontSize: 12, color: "#C5C9CE", lineHeight: 1.6 }}>{d.text}</div>
+          ))}
+        </div>
+      )}
 
       <div style={{ marginTop: 18, paddingTop: 16, borderTop: "1px solid rgba(255,255,255,.06)" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 9 }}>
