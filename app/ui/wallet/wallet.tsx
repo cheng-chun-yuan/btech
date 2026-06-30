@@ -14,7 +14,6 @@ import { NostrChatClient, relayUrl, scopeFor, type DecryptedMessage } from "./no
 import type {
   Approval,
   Chat,
-  ChatMessage,
   SignerKey,
   Tier,
   WalletState,
@@ -160,6 +159,7 @@ export default function Wallet() {
     { npub: string; label: string; role: string; initials: string; color: string }[]
   >([]);
   const [relayMsgs, setRelayMsgs] = useState<Record<string, DecryptedMessage[]>>({});
+  const [relayConnected, setRelayConnected] = useState<boolean | null>(null);
   const chatClientRef = useRef<NostrChatClient | null>(null);
   const [chainTip, setChainTip] = useState<number | null>(null);
   const [activity, setActivity] = useState<ActivityRow[] | null>(null);
@@ -453,8 +453,10 @@ export default function Wallet() {
   // Relay client lifecycle: (re)build when signer/me/chats change; subscribe to all chats.
   useEffect(() => {
     if (!signer || !me || chats.length === 0) return;
+    let cancelled = false;
     const client = new NostrChatClient(signer, me.npub, relayUrl());
     chatClientRef.current = client;
+    void client.ensureConnected().then((ok) => { if (!cancelled) setRelayConnected(ok); });
     const chatIds = chats.map((c) => c.id);
     const knownAuthors = new Set<string>([me.npub, ...chats.flatMap((c) => c.memberNpubs ?? [])]);
     const sub = client.subscribe(chatIds, knownAuthors, (m) => {
@@ -465,6 +467,7 @@ export default function Wallet() {
       });
     });
     return () => {
+      cancelled = true;
       sub.close();
       client.close();
       chatClientRef.current = null;
@@ -876,14 +879,15 @@ export default function Wallet() {
               removeKey={removeKey}
               proposeKey={proposeKey}
               onAuthorClick={(m) =>
-                m.authorNpub &&
-                setPopover({ npub: m.authorNpub, name: m.who, initials: m.initials, color: m.color })
+                m.npub &&
+                setPopover({ npub: m.npub, name: m.name, initials: m.initials, color: m.color })
               }
               members={members}
               onMemberClick={(mem) =>
                 setPopover({ npub: mem.npub, name: mem.label, initials: mem.initials, color: mem.color, role: mem.role })
               }
               relayMessages={relayMsgs[active.id] ?? []}
+              relayConnected={relayConnected}
               meNpub={me?.npub ?? ""}
               personas={personas}
               signerPick={signerPick}
@@ -1366,6 +1370,7 @@ function ChatDetail({
   members,
   onMemberClick,
   relayMessages,
+  relayConnected,
   meNpub,
   personas,
   signerPick,
@@ -1391,10 +1396,11 @@ function ChatDetail({
   setThreshold: (chatId: string, tierId: string, delta: number) => () => void;
   removeKey: (chatId: string, tierId: string, keyId: string) => () => void;
   proposeKey: (chatId: string, tierId: string) => () => void;
-  onAuthorClick: (m: ChatMessage) => void;
+  onAuthorClick: (a: { npub: string; name: string; initials: string; color: string; role?: string }) => void;
   members: { npub: string; label: string; role: string; initials: string; color: string }[];
   onMemberClick: (m: { npub: string; label: string; role: string; initials: string; color: string }) => void;
   relayMessages: DecryptedMessage[];
+  relayConnected: boolean | null;
   meNpub: string;
   personas: Persona[];
   signerPick: Set<number>;
@@ -1415,6 +1421,12 @@ function ChatDetail({
           <div style={{ fontSize: 11.5, color: C.faint2, display: "flex", alignItems: "center", gap: 7, marginTop: 2 }}>
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }} />
             {isDirect ? "Direct message" : "Channel"} · {chat.members} members
+            <span style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 4 }}>
+              <span style={{ width: 5, height: 5, borderRadius: "50%", background: relayConnected === true ? C.green : relayConnected === null ? "#F0A500" : "#E05252", flexShrink: 0 }} />
+              <span style={{ fontSize: 10.5, color: C.faint }}>
+                {relayConnected === true ? "relay" : relayConnected === null ? "connecting…" : "relay offline"}
+              </span>
+            </span>
           </div>
           {hasVault &&
             (chat.receiveAddress ? (
@@ -1448,7 +1460,7 @@ function ChatDetail({
                 <div key={m.id} style={{ display: "flex", gap: 12 }}>
                   <button
                     type="button"
-                    onClick={() => onAuthorClick({ id: m.id, who, handle: "", initials, color, time: "", text: m.text, signed: false, zaps: "", authorNpub: m.authorNpub } as ChatMessage)}
+                    onClick={() => onAuthorClick({ npub: m.authorNpub, name: who, initials, color })}
                     style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
                   >
                     <span style={{ width: 34, height: 34, borderRadius: 10, background: color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color: C.bg, flex: "0 0 34px" }}>{initials}</span>
@@ -1456,6 +1468,8 @@ function ChatDetail({
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
                       <span style={{ fontSize: 13, fontWeight: 600 }}>{who}</span>
+                      <span style={{ fontSize: 10.5, color: C.faint }}>{new Date(m.createdAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                      <span title="NIP-44 encrypted · signed" style={{ fontSize: 10, fontWeight: 600, color: C.green, background: "rgba(63,185,80,.12)", padding: "2px 6px", borderRadius: 20 }}>🔒</span>
                     </div>
                     <div style={{ fontSize: 13, color: "#C5C9CE", lineHeight: 1.55, marginTop: 4 }}>{m.text}</div>
                   </div>
