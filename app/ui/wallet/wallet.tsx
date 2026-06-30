@@ -164,6 +164,8 @@ export default function Wallet() {
   const [chainTip, setChainTip] = useState<number | null>(null);
   const [activity, setActivity] = useState<ActivityRow[] | null>(null);
   const btcPrice = useBtcPrice();
+  const VALID_DEFAULT_IDS = [1, 3, 4, 6, 7, 8];
+  const [signerPick, setSignerPick] = useState<Set<number>>(new Set(VALID_DEFAULT_IDS));
 
   useEffect(() => {
     fetch("/api/chain/tip")
@@ -428,6 +430,11 @@ export default function Wallet() {
     };
   }, [active?.id]);
 
+  // Reset the signer picker whenever the send dialog opens.
+  useEffect(() => {
+    if (sendForm.open) setSignerPick(new Set(VALID_DEFAULT_IDS));
+  }, [sendForm.open]);
+
   // Resolve the NIP-44 signer whenever the logged-in user changes.
   useEffect(() => {
     if (!me) {
@@ -653,8 +660,9 @@ export default function Wallet() {
     if (!activeChat || !sendForm.dest.trim() || !(amt > 0)) return;
     const chat = chats.find((c) => c.id === activeChat);
     if (!chat) return;
-    const threshold = chat.tiers.reduce((a, t) => a + clampNeed(t), 0);
-    const policy = chat.tiers.map((t) => `${clampNeed(t)}/${t.keys.length}`).join(" + ");
+    const chosen = personas.filter((p) => signerPick.has(p.participant_id));
+    const threshold = chosen.length > 0 ? chosen.length : chat.tiers.reduce((a, t) => a + clampNeed(t), 0);
+    const policy = chosen.length > 0 ? `${chosen.length} chosen signers` : chat.tiers.map((t) => `${clampNeed(t)}/${t.keys.length}`).join(" + ");
     const dest = sendForm.dest.trim();
     const destShort = dest.length > 16 ? `${dest.slice(0, 8)}…${dest.slice(-4)}` : dest;
     const usd = btcPrice != null ? Math.round(amt * btcPrice).toLocaleString("en-US") : "";
@@ -685,10 +693,12 @@ export default function Wallet() {
     };
     const announce = `Requested a transfer — ${amt} BTC to ${destShort} on ${module}. Needs a ${policy} quorum — please review and sign in Approvals.`;
     void (async () => {
+      const signerNpubs = chosen.map((p) => p.npub);
+      const postBody = chosen.length > 0 ? { ...proposal, signerNpubs } : proposal;
       const res = await fetch("/api/approvals", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(proposal),
+        body: JSON.stringify(postBody),
       });
       const created = res.ok ? ((await res.json()) as { approval: Approval }).approval : proposal;
       setApprovals((prev) => [created, ...prev]);
@@ -717,7 +727,11 @@ export default function Wallet() {
   const balancesPending = vaultChats.some((c) => c.receiveAddress && c.balanceBtc === "");
   const totalKeys = vaultChats.reduce((s, c) => s + c.tiers.reduce((a, t) => a + t.keys.length, 0), 0);
   const vaultCount = vaultChats.length;
-  const youNeed = approvals.filter((t) => !t.youSigned && t.status === "pending").length;
+  const youNeed = approvals.filter((t) => {
+    if (t.status !== "pending" || t.youSigned) return false;
+    if (!t.signerSet) return true;
+    return t.signerSet.some((s) => s.npub === (me?.npub ?? ""));
+  }).length;
   const sendApprovals = approvals.filter((a) => a.kind !== "role");
   const roleApprovals = approvals.filter((a) => a.kind === "role");
 
@@ -871,6 +885,9 @@ export default function Wallet() {
               }
               relayMessages={relayMsgs[active.id] ?? []}
               meNpub={me?.npub ?? ""}
+              personas={personas}
+              signerPick={signerPick}
+              setSignerPick={setSignerPick}
             />
           )}
 
@@ -1350,6 +1367,9 @@ function ChatDetail({
   onMemberClick,
   relayMessages,
   meNpub,
+  personas,
+  signerPick,
+  setSignerPick,
 }: {
   chat: Chat;
   audit: { entries?: AuditEntryUI[]; restricted?: boolean };
@@ -1376,6 +1396,9 @@ function ChatDetail({
   onMemberClick: (m: { npub: string; label: string; role: string; initials: string; color: string }) => void;
   relayMessages: DecryptedMessage[];
   meNpub: string;
+  personas: Persona[];
+  signerPick: Set<number>;
+  setSignerPick: (updater: Set<number> | ((prev: Set<number>) => Set<number>)) => void;
 }) {
   const quorum = quorumOf(chat.tiers);
   const hasVault = !!chat.vaultStatus || chat.tiers.length > 0;
@@ -1461,6 +1484,32 @@ function ChatDetail({
                   <Field label="AMOUNT (BTC)">
                     <input value={sendForm.amount} onChange={(e) => setSendForm({ ...sendForm, amount: e.target.value })} inputMode="decimal" placeholder="0.00" style={{ ...inputStyle, fontFamily: MONO }} />
                   </Field>
+                </div>
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 11, color: C.faint, marginBottom: 6 }}>
+                    Signers ({signerPick.size} chosen · all must sign)
+                  </div>
+                  {personas.map((p) => {
+                    const on = signerPick.has(p.participant_id);
+                    return (
+                      <label key={p.participant_id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "3px 0", cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={() =>
+                            setSignerPick((prev) => {
+                              const next = new Set(prev);
+                              if (on) next.delete(p.participant_id);
+                              else next.add(p.participant_id);
+                              return next;
+                            })
+                          }
+                        />
+                        <span>{p.label}</span>
+                        <span style={{ color: C.faint }}>· {p.role} · #{p.participant_id}</span>
+                      </label>
+                    );
+                  })}
                 </div>
                 <button onClick={submitSend} style={{ width: "100%", marginTop: 12, background: C.orange, border: "none", color: C.bg, fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", padding: 10, borderRadius: 8, cursor: "pointer" }}>
                   Request signatures from {quorum}
