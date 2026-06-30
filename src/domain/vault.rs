@@ -22,6 +22,10 @@ use crate::domain::approval::ApprovalRequest;
 pub struct VaultKeyMaterial {
     pub group_key: GroupKey,
     pub shares: Vec<HtssLocalKeyShare>,
+    /// The grouped policy these shares were dealt for. Persisted so a reshared
+    /// vault keeps its NEW policy across restarts (not the seed config).
+    #[serde(default = "crate::domain::policy::grouped_config_123_of_235_or_panic")]
+    pub grouped_config: GroupedThresholdConfig,
 }
 
 pub struct VaultService {
@@ -162,6 +166,7 @@ impl VaultService {
         Some(VaultKeyMaterial {
             group_key,
             shares: self.local_shares.values().cloned().collect(),
+            grouped_config: self.grouped_config.clone(),
         })
     }
 
@@ -174,6 +179,14 @@ impl VaultService {
             .into_iter()
             .map(|share| (share.participant_id, share))
             .collect();
+        // Rebuild the hierarchical config the signing math reads from, in case the
+        // loaded material is for a reshared policy that differs from the seed.
+        if let Ok(htss) = hierarchical_config_from_grouped_threshold(&material.grouped_config) {
+            if let Ok(dkg) = HtssDkgService::new(self.dkg.session_id.0.clone(), htss) {
+                self.dkg = dkg;
+            }
+        }
+        self.grouped_config = material.grouped_config;
     }
 
     pub fn sign_approval(
@@ -455,5 +468,26 @@ impl VaultService {
 
     pub fn remaining_relay_events(&self) -> usize {
         self.coordinator.transport().pending_len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exported_key_material_round_trips_the_grouped_config() {
+        let mut svc = VaultService::new(
+            "v-roundtrip",
+            "dkg-roundtrip",
+            "regtest",
+            [0u8; 32],
+            crate::domain::policy::grouped_config_123_of_235().unwrap(),
+        )
+        .unwrap();
+        svc.connect_transport().unwrap();
+        svc.run_htss_dkg().unwrap();
+        let material = svc.export_key_material().unwrap();
+        assert_eq!(material.grouped_config, svc.grouped_config);
     }
 }

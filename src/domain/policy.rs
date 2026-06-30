@@ -2,6 +2,12 @@ use dkgkit_sdk::{
     GroupThresholdRequirement, GroupedThresholdConfig, ParticipantId, RankedParticipant, Result,
 };
 
+/// Backwards-compat default for `VaultKeyMaterial.grouped_config` on vault files
+/// written before the field existed (they were all the seed 123-of-235 policy).
+pub fn grouped_config_123_of_235_or_panic() -> GroupedThresholdConfig {
+    grouped_config_123_of_235().expect("seed grouped config is valid")
+}
+
 pub fn grouped_config_123_of_235() -> Result<GroupedThresholdConfig> {
     GroupedThresholdConfig::new(
         vec![
