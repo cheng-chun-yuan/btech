@@ -9,7 +9,7 @@ use dkgkit_sdk::{
     hierarchical_config_from_grouped_threshold, htss_nonce, htss_sign_share,
     htss_sign_share_for_output, validate_grouped_threshold_signer_set, DkgKitError,
     FrostCoordinator, GroupKey, GroupedThresholdConfig, HtssDkgRound1State, HtssDkgService,
-    HtssLocalKeyShare, ParticipantId, Result, SessionId,
+    HtssLocalKeyShare, HtssLocalNonce, HtssNoncePackage, ParticipantId, Result, SessionId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -34,6 +34,10 @@ pub struct VaultService {
     round1_states: BTreeMap<ParticipantId, HtssDkgRound1State>,
     local_shares: BTreeMap<ParticipantId, HtssLocalKeyShare>,
     group_key: Option<GroupKey>,
+    /// Per-signing-session secret local nonces collected during the
+    /// pre-commit round (round 1), keyed by signing session id then participant.
+    /// Consumed and dropped by `htss_finalize` so a nonce is never reused.
+    sign_sessions: BTreeMap<String, BTreeMap<ParticipantId, HtssLocalNonce>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +67,7 @@ impl VaultService {
             round1_states: BTreeMap::new(),
             local_shares: BTreeMap::new(),
             group_key: None,
+            sign_sessions: BTreeMap::new(),
         })
     }
 
@@ -232,6 +237,111 @@ impl VaultService {
             &self.dkg.config,
         )?;
         let verified = verify_aggregate_signature_digest(&group_key, &digest, &aggregate)?;
+        anyhow::ensure!(verified, "aggregate signature failed Bitcoin verification");
+
+        Ok(SigningResult {
+            signature_hex: hex::encode(aggregate.signature_bytes),
+            digest_hex: hex::encode(digest),
+            signer_ids: signer_set.iter().map(|id| id.0).collect(),
+            verified,
+        })
+    }
+
+    /// Round 1 for one signer: generate that participant's single-use nonce,
+    /// publish its public package over the coordinator, and stash the secret
+    /// local nonce under `signing_session_id`. Idempotent per (session,
+    /// participant) — re-calling returns the already-published package. Returns
+    /// the public nonce package (safe to store/display).
+    pub fn htss_precommit(
+        &mut self,
+        signing_session_id: &str,
+        participant_id: ParticipantId,
+    ) -> anyhow::Result<HtssNoncePackage> {
+        if let Some(existing) = self
+            .sign_sessions
+            .get(signing_session_id)
+            .and_then(|s| s.get(&participant_id))
+        {
+            return Ok(existing.package.clone());
+        }
+        let session = SessionId::new(signing_session_id)?;
+        let share = self
+            .local_shares
+            .get(&participant_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing local share for signer {}", participant_id.0))?;
+        let nonce = htss_nonce(session, &share)?;
+        self.coordinator.publish_htss_nonce(&nonce.package)?;
+        let package = nonce.package.clone();
+        self.sign_sessions
+            .entry(signing_session_id.to_string())
+            .or_default()
+            .insert(participant_id, nonce);
+        Ok(package)
+    }
+
+    /// Round 2: every member of `signer_set` must already have pre-committed.
+    /// Drain the public nonces, compute each signer's share from its stored
+    /// local nonce, aggregate, BIP340-verify, then DROP the session so its
+    /// nonces can never be reused.
+    pub fn htss_finalize(
+        &mut self,
+        signing_session_id: &str,
+        approval: &ApprovalRequest,
+        signer_set: Vec<ParticipantId>,
+    ) -> anyhow::Result<SigningResult> {
+        validate_grouped_threshold_signer_set(&signer_set, &self.grouped_config)?;
+        let group_key = self
+            .group_key
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("vault DKG is not finalized"))?;
+        let local_nonces = self
+            .sign_sessions
+            .get(signing_session_id)
+            .ok_or_else(|| anyhow::anyhow!("no pre-commit session '{signing_session_id}'"))?;
+        let session = SessionId::new(signing_session_id)?;
+        let digest = approval.digest();
+
+        // Pair each selected signer with its share + pre-committed local nonce.
+        let mut selected = Vec::with_capacity(signer_set.len());
+        for pid in &signer_set {
+            let share = self
+                .local_shares
+                .get(pid)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing local share for signer {}", pid.0))?;
+            let nonce = local_nonces
+                .get(pid)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("signer {} has not pre-committed", pid.0))?;
+            selected.push((share, nonce));
+        }
+
+        let public_nonces = self.coordinator.drain_htss_nonces(&session)?;
+        for (share, nonce) in &selected {
+            let signature_share = htss_sign_share(
+                &group_key,
+                digest,
+                share,
+                nonce,
+                &public_nonces,
+                &signer_set,
+                &self.dkg.config,
+            )?;
+            self.coordinator.publish_htss_signature_share(&signature_share)?;
+        }
+        let signature_shares = self.coordinator.drain_htss_signature_shares(&session)?;
+        let aggregate = aggregate_htss_signature_shares(
+            &group_key,
+            digest,
+            &public_nonces,
+            &signature_shares,
+            &signer_set,
+            &self.dkg.config,
+        )?;
+        let verified = verify_aggregate_signature_digest(&group_key, &digest, &aggregate)?;
+        // Single-use: drop the session's nonces no matter the outcome.
+        self.sign_sessions.remove(signing_session_id);
         anyhow::ensure!(verified, "aggregate signature failed Bitcoin verification");
 
         Ok(SigningResult {

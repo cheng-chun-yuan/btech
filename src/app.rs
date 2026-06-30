@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use dkgkit_sdk::bitcoin::{
     finalize_taproot_keyspend, taproot_keyspend_sighashes, TaprootSpendInput, TaprootSpendOutput,
 };
+use dkgkit_sdk::ParticipantId;
+
+pub use dkgkit_sdk::HtssNoncePackage;
 
 use crate::domain::approval::ApprovalRequest;
 use crate::domain::policy::{
@@ -294,6 +297,58 @@ impl WalletApp {
         })
     }
 
+    /// Round 1 wrapper: ensure the vault is initialized, then pre-commit the
+    /// given participant's nonce for `session`. Returns the public package.
+    pub fn htss_precommit(
+        &mut self,
+        session: &str,
+        participant_id: u16,
+    ) -> anyhow::Result<HtssNoncePackage> {
+        self.init()?;
+        self.vault.htss_precommit(session, ParticipantId::new(participant_id)?)
+    }
+
+    /// Round 2 wrapper: build the same payment authorization `sign_payment`
+    /// binds (recipient + amount + nonce + memo), then finalize `session` with
+    /// the chosen signer set. `nonce` here is the approval-binding id, not the
+    /// cryptographic nonce.
+    pub fn htss_finalize(
+        &mut self,
+        session: &str,
+        nonce: &str,
+        recipient: &str,
+        amount_sats: u64,
+        memo: &str,
+        signer_set: Vec<u16>,
+    ) -> anyhow::Result<DemoReport> {
+        self.init()?;
+        let approval = ApprovalRequest::payment(
+            nonce.to_string(),
+            self.vault.network.clone(),
+            recipient.to_string(),
+            amount_sats,
+            memo.to_string(),
+        );
+        let ids = signer_set
+            .into_iter()
+            .map(ParticipantId::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        let signing = self.vault.htss_finalize(session, &approval, ids)?;
+        let address = self.vault.derive_receive_address(0, 0, 0)?;
+        Ok(DemoReport {
+            vault_id: self.vault.vault_id.clone(),
+            network: self.vault.network.clone(),
+            group_xonly_public_key: self.vault.group_xonly_public_key_hex()?,
+            receive_path: address.path.display_path(),
+            receive_address: address.address,
+            signers: signing.signer_ids,
+            authorization_digest: signing.digest_hex,
+            aggregate_signature: signing.signature_hex,
+            verified: signing.verified,
+            remaining_relay_events: self.vault.remaining_relay_events(),
+        })
+    }
+
     pub fn repository(&self) -> &InMemoryRepository {
         &self.repository
     }
@@ -348,6 +403,45 @@ mod tests {
         assert!(report.txid.len() == 64);
         assert!(!report.raw_tx_hex.is_empty());
         assert_eq!(report.vault_address, vault_address);
+    }
+
+    #[test]
+    fn collapsed_two_round_precommit_then_finalize_verifies() {
+        let mut app = WalletApp::demo().unwrap();
+        app.init().unwrap();
+        let set: Vec<u16> = vec![1, 3, 4, 6, 7, 8];
+        for pid in &set {
+            app.htss_precommit("tx-collapsed-1", *pid).unwrap();
+        }
+        let report = app
+            .htss_finalize("tx-collapsed-1", "tx-collapsed-1", "bcrt1qexample", 100_000, "memo", set.clone())
+            .unwrap();
+        assert!(report.verified);
+        assert_eq!(report.signers, set);
+        assert_eq!(report.aggregate_signature.len(), 128);
+    }
+
+    #[test]
+    fn finalize_is_single_use_and_rejects_invalid_sets() {
+        let mut app = WalletApp::demo().unwrap();
+        app.init().unwrap();
+        let set: Vec<u16> = vec![1, 3, 4, 6, 7, 8];
+        for pid in &set {
+            app.htss_precommit("tx-su", *pid).unwrap();
+        }
+        // Invalid set (missing a manager): rejected, session NOT yet consumed.
+        assert!(app
+            .htss_finalize("tx-su", "tx-su", "bcrt1qx", 1, "m", vec![1, 3, 6, 7, 8])
+            .is_err());
+        // Valid finalize succeeds and consumes the session.
+        assert!(app
+            .htss_finalize("tx-su", "tx-su", "bcrt1qx", 1, "m", set.clone())
+            .unwrap()
+            .verified);
+        // Second finalize on the same session has no nonces → error (single-use).
+        assert!(app
+            .htss_finalize("tx-su", "tx-su", "bcrt1qx", 1, "m", set)
+            .is_err());
     }
 
     #[test]
