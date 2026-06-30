@@ -91,8 +91,8 @@ export class NostrChatClient {
   }
 
   /** Subscribe to my chats: backfill + live. Calls onMessage for each decryptable
-   * event addressed to me, deduped by event id. Returns a closer. */
-  subscribe(chatIds: string[], onMessage: (m: DecryptedMessage) => void): { close: () => void } {
+   * event addressed to me from a known chat member, deduped by event id. Returns a closer. */
+  subscribe(chatIds: string[], knownAuthors: Set<string>, onMessage: (m: DecryptedMessage) => void): { close: () => void } {
     const filter: Filter = { kinds: [CHAT_KIND], "#t": chatIds, limit: 500 };
     const sub = this.pool.subscribeMany(this.relays, filter, {
       onevent: (ev) => {
@@ -101,6 +101,7 @@ export class NostrChatClient {
         if (!isAddressedToMe(ev, this.meHex)) return;
         const parsed = parseChatEvent(ev);
         if (!parsed) return;
+        if (!knownAuthors.has(parsed.authorNpub)) return; // only accept known chat members
         void this.signer
           .decrypt(parsed.authorNpub, ev.content)
           .then((text) =>

@@ -62,6 +62,8 @@ export type Chat = {
   /** For a `direct` chat: the other participant's npub (the member that is not
    * the current viewer). Used to derive the NIP-44 conversation key. */
   counterpartyNpub?: string;
+  /** npubs of this chat's members (used to author-gate inbound relay messages). */
+  memberNpubs?: string[];
   /** Real group x-only public key (live vault only). */
   groupKey?: string;
   tiers: Tier[];

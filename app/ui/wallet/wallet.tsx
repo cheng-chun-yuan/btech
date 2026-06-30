@@ -449,7 +449,8 @@ export default function Wallet() {
     const client = new NostrChatClient(signer, me.npub, relayUrl());
     chatClientRef.current = client;
     const chatIds = chats.map((c) => c.id);
-    const sub = client.subscribe(chatIds, (m) => {
+    const knownAuthors = new Set<string>([me.npub, ...chats.flatMap((c) => c.memberNpubs ?? [])]);
+    const sub = client.subscribe(chatIds, knownAuthors, (m) => {
       setRelayMsgs((prev) => {
         const list = prev[m.chatId] ?? [];
         if (list.some((x) => x.id === m.id)) return prev; // dedup

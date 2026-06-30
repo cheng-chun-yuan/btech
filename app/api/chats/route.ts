@@ -56,6 +56,12 @@ export async function GET() {
   // the *other* participant (the stored name is from the creator's POV).
   const viewer = getSessionUser(db, (await cookies()).get(SESSION_COOKIE)?.value);
   const visible = filterVisibleChats(db, viewer?.npub ?? null, chats);
+  // Attach member npubs to all visible chats for client-side author-gating.
+  const memberNpubStmt = db.prepare("SELECT npub FROM chat_members WHERE chat_id = ?");
+  for (const c of visible) {
+    c.memberNpubs = (memberNpubStmt.all(c.id) as { npub: string }[]).map((r) => r.npub);
+  }
+
   if (viewer) {
     for (const c of visible) {
       if (c.type !== "direct") continue;
