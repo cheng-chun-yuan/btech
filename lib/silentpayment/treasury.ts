@@ -24,6 +24,7 @@ import {
     type DetectedPayment,
     type CandidateVtx,
 } from "./scanner";
+import { scanBlocks, esploraFetcher, type TxFetcher } from "./esplora-scan";
 
 const LABEL = "treasury";
 
@@ -117,4 +118,84 @@ export function simulateInbound(): DetectedPayment | null {
         outputs: [{ xonly: toXOnly(P), amount, leafIndex: 0 }],
     };
     return ingestCandidate(candidate)[0] ?? null;
+}
+
+// ── real on-chain (L1) detection via view-key block-walk ─────────────────────
+
+export type InboxSource = "onchain" | "modeled";
+
+export interface InboxItem {
+    source: InboxSource;
+    P: string; // x-only taproot output key (hex)
+    amount: number;
+    // on-chain only:
+    txid?: string;
+    vout?: number;
+    blockHeight?: number;
+    // modeled only:
+    vtxId?: string;
+    leafIndex?: number;
+}
+
+/** How many blocks back the first scan looks (the seeded address only ever
+ *  receives after the demo starts, so a recent window is enough). */
+const SCAN_DEPTH = Number(process.env.BTECH_STEALTH_SCAN_DEPTH ?? "500");
+
+let lastScanned: number | null = null;
+const onchain = new Map<string, InboxItem>(); // key = `${txid}:${vout}`
+
+/** Test-only: reset the on-chain cursor + store. */
+export function __resetOnchainForTest(): void {
+    lastScanned = null;
+    onchain.clear();
+}
+
+/**
+ * Walk new blocks up to the chain tip and detect inbound silent payments to the
+ * treasury with the VIEW KEY only. Deduped by `txid:vout`; advances an in-memory
+ * cursor. Returns the newly-detected items.
+ */
+export async function scanChainOnce(fetcher: TxFetcher = esploraFetcher): Promise<InboxItem[]> {
+    const tip = await fetcher.tip();
+    const from = lastScanned === null ? Math.max(0, tip - SCAN_DEPTH) : lastScanned + 1;
+    if (from > tip) {
+        lastScanned = tip;
+        return [];
+    }
+    const dets = await scanBlocks(viewKeyOf(treasury), from, tip, fetcher);
+    const fresh: InboxItem[] = [];
+    for (const d of dets) {
+        const key = `${d.txid}:${d.vout}`;
+        if (onchain.has(key)) continue;
+        const item: InboxItem = {
+            source: "onchain",
+            P: d.xonly,
+            amount: d.amount,
+            txid: d.txid,
+            vout: d.vout,
+            blockHeight: d.blockHeight,
+        };
+        onchain.set(key, item);
+        fresh.push(item);
+    }
+    lastScanned = tip;
+    return fresh;
+}
+
+/**
+ * Unified inbox: real on-chain detections (newest first) then modeled ones,
+ * deduped by the detected output key `P` (on-chain wins over a modeled echo).
+ */
+export function getInbox(): InboxItem[] {
+    const seen = new Set<string>();
+    const items: InboxItem[] = [];
+    for (const it of [...onchain.values()].reverse()) {
+        seen.add(it.P);
+        items.push(it);
+    }
+    for (const p of getInbound()) {
+        if (seen.has(p.P)) continue;
+        items.push({ source: "modeled", P: p.P, amount: p.amount, vtxId: p.vtxId, leafIndex: p.leafIndex });
+    }
+    return items;
 }
