@@ -12,6 +12,12 @@ import { resolveSigner, type NostrSigner } from "./nostr-signer";
 import { NostrChatClient, relayUrl, scopeFor, type DecryptedMessage } from "./nostr-chat";
 import { mergeNewChats } from "./chat-merge";
 import { PolicyEditor } from "./policy-editor";
+import { Stat } from "./components/stat";
+import { TabButton } from "./components/tab-button";
+import { AddressChip, MetaAddressChip } from "./components/address-chip";
+import { Field } from "./components/field";
+import { LiveVaultCard } from "./components/live-vault-card";
+import { VaultBalance } from "./components/vault-balance";
 import { C, MONO, SANS, inputStyle } from "./lib/theme";
 import { fmtBtc, relTime, initialsOf, shortHex } from "./lib/format";
 import { clampNeed, quorumOf, spendOf, chatToPolicyConfig } from "./lib/policy";
@@ -1225,38 +1231,6 @@ function Overview({
   );
 }
 
-function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div>
-      <div style={{ fontSize: 11, color: C.faint2 }}>{label}</div>
-      <div style={{ fontFamily: MONO, fontSize: 14, marginTop: 3, color: color ?? C.ink }}>{value}</div>
-    </div>
-  );
-}
-
-function LiveVaultCard({ wstate }: { wstate: WalletState }) {
-  const { demo, session } = wstate;
-  return (
-    <div style={{ background: C.surface, border: "1px solid rgba(63,185,80,.25)", borderRadius: 16, padding: "20px 22px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16 }}>
-        <span style={{ fontSize: 13, fontWeight: 600 }}>Live DKGKit vault</span>
-        <span style={{ fontSize: 9.5, fontWeight: 600, letterSpacing: ".4px", color: C.green, background: "rgba(63,185,80,.12)", padding: "3px 8px", borderRadius: 20 }}>
-          {demo.verified ? "VERIFIED" : "UNVERIFIED"}
-        </span>
-        <span style={{ fontSize: 11, color: C.faint2 }}>{demo.network} · {session.htss.threshold}</span>
-      </div>
-      <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px" }}>Receive address</div>
-      <div style={{ fontFamily: MONO, fontSize: 13, color: C.ink, marginTop: 4, wordBreak: "break-all" }}>
-        {demo.receive_address}
-      </div>
-      <div style={{ fontSize: 11.5, color: C.faint2, marginTop: 14, lineHeight: 1.5 }}>
-        Secured by a <span style={{ color: "#C5C9CE", fontFamily: MONO }}>{session.htss.threshold}</span> grouped
-        threshold. No single signer can move funds — every spend needs a quorum from each tier.
-      </div>
-    </div>
-  );
-}
-
 // ===========================================================================
 // Approvals
 // ===========================================================================
@@ -1303,16 +1277,6 @@ function Approvals({
         )}
       </div>
     </div>
-  );
-}
-
-function TabButton({ active, onClick, label, count }: { active: boolean; onClick: () => void; label: string; count: number }) {
-  return (
-    <button onClick={onClick} style={{ position: "relative", overflow: "hidden", border: "none", background: "transparent", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 600, fontFamily: "inherit", cursor: "pointer", color: active ? C.bg : "#9CA1A7", display: "flex", alignItems: "center", gap: 9 }}>
-      {active && <span style={{ position: "absolute", inset: 0, background: C.orange, borderRadius: 8, zIndex: 0 }} />}
-      <span style={{ position: "relative", zIndex: 1 }}>{label}</span>
-      <span style={{ position: "relative", zIndex: 1, fontFamily: MONO, fontSize: 11, opacity: 0.75 }}>{count}</span>
-    </button>
   );
 }
 
@@ -1644,144 +1608,6 @@ function ChatDetail({
 }
 
 // ===========================================================================
-// Address chip — compact receive address with copy, shown in the chat header
-// ===========================================================================
-
-function AddressChip({ address }: { address: string }) {
-  const [copied, setCopied] = useState(false);
-  const short = `${address.slice(0, 8)}…${address.slice(-5)}`;
-  const copy = () => {
-    navigator.clipboard?.writeText(address).then(
-      () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1200);
-      },
-      () => {},
-    );
-  };
-  return (
-    <button
-      onClick={copy}
-      title={copied ? "Copied" : `Copy ${address}`}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        background: C.surface2,
-        border: `1px solid ${copied ? "rgba(63,185,80,.4)" : C.line2}`,
-        color: copied ? C.green : "#9CA1A7",
-        fontFamily: MONO,
-        fontSize: 11.5,
-        fontWeight: 500,
-        padding: "3px 9px",
-        borderRadius: 7,
-        cursor: "pointer",
-      }}
-    >
-      {copied ? "Copied" : short}
-      <span aria-hidden style={{ fontSize: 12 }}>
-        {copied ? "✓" : "⧉"}
-      </span>
-    </button>
-  );
-}
-
-// The treasury's one reusable BIP-352 silent-payment address (tsp1…). Shown next
-// to the L1/Arkade receive address so anyone can copy it — one static address,
-// every payment to it lands on a fresh, unlinkable output. Fetched once from
-// /api/stealth (the published meta-address; B_scan‖B_spend).
-function MetaAddressChip() {
-  const [meta, setMeta] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    let alive = true;
-    fetch("/api/stealth")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d: { metaAddress?: string } | null) => {
-        if (alive && d?.metaAddress) setMeta(d.metaAddress);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, []);
-  if (!meta) return null;
-  const short = `${meta.slice(0, 10)}…${meta.slice(-5)}`;
-  const copy = () => {
-    navigator.clipboard?.writeText(meta).then(
-      () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1200);
-      },
-      () => {},
-    );
-  };
-  return (
-    <button
-      onClick={copy}
-      title={copied ? "Copied" : `Silent-payment address — one reusable BIP-352 address, every payment unlinkable. Copy:\n${meta}`}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        background: "rgba(167,139,250,.08)",
-        border: `1px solid ${copied ? "rgba(63,185,80,.4)" : "rgba(167,139,250,.35)"}`,
-        color: copied ? C.green : "#C4B5FD",
-        fontFamily: MONO,
-        fontSize: 11.5,
-        fontWeight: 500,
-        padding: "3px 9px",
-        borderRadius: 7,
-        cursor: "pointer",
-        maxWidth: "100%",
-      }}
-    >
-      <span style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: ".4px", color: "#A78BFA", background: "rgba(167,139,250,.16)", padding: "1px 5px", borderRadius: 20 }}>STEALTH</span>
-      {copied ? "Copied" : short}
-      <span aria-hidden style={{ fontSize: 12 }}>{copied ? "✓" : "⧉"}</span>
-    </button>
-  );
-}
-
-// ===========================================================================
-// Vault balance — live on-chain balance for the receive address, shown in the
-// chat header right under the address (no separate "Shared vault" card).
-// ===========================================================================
-
-function VaultBalance({ address }: { address: string }) {
-  const [chain, setChain] = useState<{ totalSats: number; confirmedSats: number; mempoolSats: number } | null>(null);
-  const [chainErr, setChainErr] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    setChain(null);
-    setChainErr(false);
-    fetch(`/api/chain/address/${address}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("chain"))))
-      .then((d) => !cancelled && setChain(d))
-      .catch(() => !cancelled && setChainErr(true));
-    return () => {
-      cancelled = true;
-    };
-  }, [address]);
-
-  return (
-    <div style={{ marginTop: 8 }}>
-      <div style={{ fontSize: 10.5, color: C.faint2, letterSpacing: ".3px" }}>On-chain balance · regtest</div>
-      <div style={{ fontFamily: MONO, fontSize: 20, fontWeight: 600, color: chain && chain.totalSats > 0 ? C.green : "#C5C9CE", marginTop: 2 }}>
-        {chain
-          ? `${(chain.totalSats / 1e8).toFixed(8)} BTC`
-          : chainErr
-            ? "—"
-            : "checking…"}
-        {chain && chain.mempoolSats > 0 && (
-          <span style={{ color: C.sand, fontSize: 12, fontWeight: 400 }}> ({(chain.mempoolSats / 1e8).toFixed(8)} pending)</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ===========================================================================
 // Ongoing proposals — pending approvals for this vault, awaiting a quorum
 // ===========================================================================
 
@@ -1937,15 +1763,6 @@ function AuditPanel({ audit }: { audit: { entries?: AuditEntryUI[]; restricted?:
         </div>
       )}
     </aside>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <div style={{ fontSize: 10.5, color: C.faint2, marginBottom: 5 }}>{label}</div>
-      {children}
-    </div>
   );
 }
 
