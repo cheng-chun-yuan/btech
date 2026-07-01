@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Package manager: **Bun** (`bun run`, `bun test`, `bun add`) — never npm.
+- Package manager: **Bun** (`bun run`, `bun add`) — never npm. Tests run via **`bun run test`** (→ `vitest run`), NOT `bun test` (Bun's own runner lacks `vi.hoisted`). Typecheck: `bun run typecheck`.
 - Sub-agents implementing this plan **may write and execute code** (btech exception in the user's global CLAUDE.md).
 - dkgkit is public: `https://github.com/cheng-chun-yuan/dkgkit`, pin rev **`751ed81`**.
 - Esplora REST base is used as `${BTECH_ESPLORA_URL}/api/...` — any esplora URL must resolve `${URL}/api/blocks/tip/height` (public default `https://btc.utxopia.com/regtest`; local default `http://esplora/regtest`).
@@ -197,7 +197,7 @@ describe("treasury on-chain scan", () => {
 
 - [ ] **Step 2: Run it to confirm it fails**
 
-Run: `bun test lib/silentpayment/treasury.test.ts`
+Run: `bun run test lib/silentpayment/treasury.test.ts`
 Expected: FAIL — `scanChainOnce`, `getInbox`, `__resetOnchainForTest` are not exported.
 
 - [ ] **Step 3: Implement the scan + unified inbox in `treasury.ts`**
@@ -292,7 +292,7 @@ export function getInbox(): InboxItem[] {
 
 - [ ] **Step 4: Run the test to confirm it passes**
 
-Run: `bun test lib/silentpayment/treasury.test.ts`
+Run: `bun run test lib/silentpayment/treasury.test.ts`
 Expected: PASS (2 tests).
 
 - [ ] **Step 5: Typecheck**
@@ -379,7 +379,7 @@ Expected: no errors. If it flags an unused `ingestCandidate` import in `settle.t
 
 - [ ] **Step 4: Verify the full suite still passes**
 
-Run: `bun test`
+Run: `bun run test`
 Expected: all suites pass (including the new `treasury.test.ts` and the untouched `esplora-scan.test.ts`).
 
 - [ ] **Step 5: Commit**
@@ -1104,7 +1104,7 @@ Expected: `clean`.
 
 - [ ] **Step 4: Add LICENSE (MIT) + CONTRIBUTING.md**
 
-Create `LICENSE` with the standard MIT text (copyright holder: the repo owner, year 2026). Create `CONTRIBUTING.md` covering: from-source dev (`cargo build`, `bun install`, `bun run dev`, env), running tests (`bun test`, `bun run typecheck`, `cargo test`), the Docker stack, and the Phase-1/Phase-2 scope (link `docs/superpowers/specs/2026-07-01-open-source-silent-payment-treasury-design.md`).
+Create `LICENSE` with the standard MIT text (copyright holder: the repo owner, year 2026). Create `CONTRIBUTING.md` covering: from-source dev (`cargo build`, `bun install`, `bun run dev`, env), running tests (`bun run test`, `bun run typecheck`, `cargo test`), the Docker stack, and the Phase-1/Phase-2 scope (link `docs/superpowers/specs/2026-07-01-open-source-silent-payment-treasury-design.md`).
 
 - [ ] **Step 5: Verify docs commands exist**
 
@@ -1151,7 +1151,7 @@ jobs:
           bun-version: latest
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
-      - run: bun test
+      - run: bun run test
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -1166,7 +1166,7 @@ Run:
 ```bash
 bun install --frozen-lockfile
 bun run typecheck
-bun test
+bun run test
 cargo build --bin vaultd
 ```
 Expected: all succeed.
@@ -1210,7 +1210,7 @@ Open two browser profiles at `http://localhost:3000`, log in as two personas, ex
 
 - [ ] **Step 4: Capture evidence + final suite**
 
-Run: `bun run typecheck && bun test && echo "ALL GREEN"`
+Run: `bun run typecheck && bun run test && echo "ALL GREEN"`
 Expected: `ALL GREEN`. Record the broadcast txid + detection JSON from Step 2 in the PR/commit description.
 
 - [ ] **Step 5: Tear down**
