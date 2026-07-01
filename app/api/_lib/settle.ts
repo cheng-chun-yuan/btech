@@ -4,7 +4,6 @@ import { runDemo, runSettle, type SettlementInput } from "./btech";
 import { addressUtxos, broadcastTx } from "./esplora";
 import {
   deriveInternalSend,
-  ingestCandidate,
   type InternalSendDerivation,
 } from "../../../lib/silentpayment/treasury";
 import { decodeP2TR } from "../../../lib/silentpayment/crypto";
@@ -82,7 +81,6 @@ export async function settleVault(
   // any address we can't derive (an external tsp1).
   let recipient = params.recipient;
   let stealth: InternalSendDerivation | null = null;
-  let stealthInputs: { userPK: string; vtxoId: string }[] = [];
   if (isSilentAddress(recipient)) {
     const vaultXOnly = decodeP2TR(vaultAddress);
     const hrp = vaultAddress.slice(0, vaultAddress.indexOf("1"));
@@ -93,27 +91,11 @@ export async function settleVault(
         "silent payment: this vault doesn't hold the scan key for that address (only the treasury's own stealth address is supported here)",
       );
     }
-    stealthInputs = inputs.map((i) => ({ userPK: `02${vaultXOnly}`, vtxoId: `${i.txid}:${i.vout}` }));
     recipient = stealth.derivedAddress;
   }
 
   const report = await runSettle({ recipient, amountSats, feeSats, inputs }, params.vaultId);
   const txid = await broadcastTx(report.raw_tx_hex);
-
-  // Model the operator stream so the recipient's view-key scanner detects the
-  // inbound stealth payment (surfaced in the /api/stealth inbox). Best-effort:
-  // detection is a demo convenience, never fail a real broadcast over it.
-  if (stealth) {
-    try {
-      ingestCandidate({
-        vtxId: txid,
-        inputs: stealthInputs,
-        outputs: [{ xonly: stealth.xonly, amount: amountSats, leafIndex: stealth.k }],
-      });
-    } catch {
-      // ignore — the spend already broadcast on-chain
-    }
-  }
 
   recordAudit(db, {
     chatId: params.vaultId,
