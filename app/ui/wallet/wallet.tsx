@@ -13,6 +13,8 @@ import { NostrChatClient, relayUrl, scopeFor, type DecryptedMessage } from "./no
 import { mergeNewChats } from "./chat-merge";
 import { PolicyEditor } from "./policy-editor";
 import { C, MONO, SANS, inputStyle } from "./lib/theme";
+import { fmtBtc, relTime, initialsOf, shortHex } from "./lib/format";
+import { clampNeed, quorumOf, spendOf, chatToPolicyConfig } from "./lib/policy";
 import type {
   Approval,
   ActivityApiEntry,
@@ -22,60 +24,9 @@ import type {
   PolicyConfig,
   PolicyDiffItem,
   Tab,
-  Tier,
   View,
   WalletState,
 } from "./types";
-
-function clampNeed(t: Tier): number {
-  return Math.max(1, Math.min(t.minNeed, t.keys.length));
-}
-function quorumOf(tiers: Tier[]): string {
-  return tiers.map((t) => `${clampNeed(t)}/${t.keys.length}`).join(" + ");
-}
-function spendOf(tiers: Tier[]): string {
-  return "spend = " + tiers.map((t) => `(${clampNeed(t)} of ${t.keys.length} ${t.short})`).join("  AND  ");
-}
-
-/** Map the display `tiers` of a chat to the editable `PolicyConfig` the
- * PolicyEditor works on. Each tier becomes a rank (0,1,2…). A display `SignerKey`
- * carries no npub, so we derive the Rust signer id by parsing `k.id` ("k1"→1,
- * "k0-2"→0) and look the npub up from the vault roster by that id; falling back to
- * the slot index + 1 and an empty npub when neither is available. */
-function chatToPolicyConfig(
-  chat: Chat,
-  roster: { npub: string; label: string; participantId: number }[],
-): PolicyConfig {
-  const byPid = new Map(roster.map((r) => [r.participantId, r]));
-  return {
-    tiers: chat.tiers.map((t, i) => ({
-      id: t.id,
-      name: t.name,
-      rank: i,
-      required: clampNeed(t),
-      signers: t.keys.map((k, j) => {
-        const pid = Number.parseInt(k.id.replace(/\D/g, ""), 10) || j + 1;
-        const r = byPid.get(pid);
-        return { participantId: pid, npub: r?.npub ?? "", label: k.name, rank: i };
-      }),
-    })),
-  };
-}
-
-function fmtBtc(sats: number): string {
-  return (Math.abs(sats) / 1e8).toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 8,
-  });
-}
-function relTime(unixSec: number | null): string {
-  if (unixSec == null) return "pending";
-  const diff = Date.now() / 1000 - unixSec;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86_400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86_400)}d ago`;
-}
 
 // Demo persona switching. The login screen logs a persona in with one tap by
 // signing the challenge with a deterministic per-participant secret; we reuse
@@ -96,13 +47,6 @@ function challengeTemplate(nonce: string): EventTemplate {
 async function personaSecret(participantId: number): Promise<Uint8Array> {
   const data = new TextEncoder().encode(`btech-signer-v1:${participantId}`);
   return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
-}
-
-function initialsOf(label: string): string {
-  const parts = label.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
 export default function Wallet() {
@@ -1127,10 +1071,6 @@ function Sidebar({
 // ===========================================================================
 // Overview
 // ===========================================================================
-
-function shortHex(hex: string): string {
-  return hex && hex.length > 20 ? `${hex.slice(0, 12)}…${hex.slice(-10)}` : hex;
-}
 
 function Overview({
   wstate,
