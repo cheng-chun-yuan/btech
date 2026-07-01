@@ -4,7 +4,7 @@ BTech is a treasury console for **companies and institutions that want to hold
 and use bitcoin themselves** — without handing custody to an exchange, and
 without any single person (or device) able to move funds alone.
 
-It is built on top of [**DKGKit**](../dkgkit), which provides the cryptography:
+It is built on top of [**DKGKit**](https://github.com/cheng-chun-yuan/dkgkit), which provides the cryptography:
 a **Hierarchical Threshold Signature Scheme (HTSS)** where the spending key is
 generated and held collectively, and a spend requires a quorum across
 organizational tiers — not one signer, not one server.
@@ -64,10 +64,11 @@ DKGKit gives BTech the full threshold-signing lifecycle:
 
 ## Quickstart
 
-Requires the [`dkgkit`](../dkgkit) crates as a sibling checkout, plus
-[Bun](https://bun.sh) and a Rust toolchain.
+Requires the [`dkgkit`](https://github.com/cheng-chun-yuan/dkgkit) crates as a
+sibling checkout, plus [Bun](https://bun.sh) and a Rust toolchain.
 
 ```bash
+git clone https://github.com/cheng-chun-yuan/dkgkit ../dkgkit   # sibling checkout
 cargo build                 # build the CLI + vaultd + relaydemo binaries
 bun install
 

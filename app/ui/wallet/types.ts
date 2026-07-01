@@ -129,8 +129,12 @@ export type Approval = {
   status: ApprovalStatus;
   /** Set when this approval is bound to the live DKGKit vault. */
   live?: boolean;
-  /** Full destination address (not the truncated `dest`); signed into the digest. */
+  /** Full destination address (not the truncated `dest`); signed into the digest.
+   *  For a silent payment this is the BIP-352 `tsp1…` meta-address; the real
+   *  one-time taproot output is derived from the spent inputs at broadcast. */
   recipientAddress?: string;
+  /** True when the recipient is a BIP-352 silent-payment (`tsp1…`) address. */
+  silent?: boolean;
   /** Amount in satoshis; signed into the authorization digest. */
   amountSats?: number;
   /** Real cryptographic result, populated after a live signing round. */

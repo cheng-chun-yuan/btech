@@ -112,6 +112,6 @@ DKGKIT_RELAY=ws://127.0.0.1:7777 cargo run --bin relaydemo   # in btech
 | 4 | Channels + audit | Nostr-coordinated, member-only, NIP-44 |
 | 5 | Stealth receiving | one BIP-352 address, L1 + Arkade, view-key detect |
 
-Built on **DKGKit** (HTSS/TSS in Rust) + **@arkade-os/sdk** (Arkade) + the
+Built on [**DKGKit**](https://github.com/cheng-chun-yuan/dkgkit) (HTSS/TSS in Rust) + **@arkade-os/sdk** (Arkade) + the
 `lib/silentpayment` BIP-352 core. See `STEALTH_DEMO.md` for the silent-payment
 deep dive.

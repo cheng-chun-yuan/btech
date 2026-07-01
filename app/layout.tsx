@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "BTech DKGKit Console",
+  title: "Savara DKGKit Console",
   description: "Local DKGKit wallet-service MVP for HTSS DKG and threshold approvals.",
 };
 

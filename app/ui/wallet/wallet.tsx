@@ -18,7 +18,6 @@ import type {
   Chat,
   PolicyConfig,
   PolicyDiffItem,
-  SignerKey,
   Tier,
   WalletState,
 } from "./types";
@@ -55,12 +54,6 @@ type AuditEntryUI = {
   created_at: number;
 };
 
-const STATUS_COLOR: Record<SignerKey["status"], string> = {
-  online: "#3FB950",
-  reattesting: "#E0A23C",
-  proposed: "#F7931A",
-};
-
 function clampNeed(t: Tier): number {
   return Math.max(1, Math.min(t.minNeed, t.keys.length));
 }
@@ -94,12 +87,6 @@ function chatToPolicyConfig(
       }),
     })),
   };
-}
-function statusLabelOf(k: SignerKey): string {
-  if (k.statusText) return k.statusText;
-  if (k.status === "reattesting") return "Re-attesting";
-  if (k.status === "proposed") return "Proposed";
-  return "Online";
 }
 
 // On-chain activity derived from /api/chain/activity (real esplora tx history).
@@ -165,7 +152,7 @@ export default function Wallet() {
   const [showMembers, setShowMembers] = useState(false);
   const [tab, setTab] = useState<Tab>("send");
   const [draft, setDraft] = useState("");
-  const [sendForm, setSendForm] = useState({ open: false, module: "Bitcoin regtest", dest: "", amount: "" });
+  const [sendForm, setSendForm] = useState({ open: false, module: "Bitcoin regtest", dest: "", amount: "", silent: false });
 
   const [chats, setChats] = useState<Chat[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
@@ -624,61 +611,6 @@ export default function Wallet() {
   );
 
   // ---- vault policy editing ----
-  const setThreshold = (chatId: string, tierId: string, delta: number) => () =>
-    setChats((prev) =>
-      prev.map((c) =>
-        c.id !== chatId
-          ? c
-          : {
-              ...c,
-              tiers: c.tiers.map((t) =>
-                t.id !== tierId ? t : { ...t, minNeed: Math.max(1, Math.min(t.minNeed + delta, t.keys.length)) },
-              ),
-            },
-      ),
-    );
-  const removeKey = (chatId: string, tierId: string, keyId: string) => () =>
-    setChats((prev) =>
-      prev.map((c) =>
-        c.id !== chatId
-          ? c
-          : { ...c, tiers: c.tiers.map((t) => (t.id !== tierId ? t : { ...t, keys: t.keys.filter((k) => k.id !== keyId) })) },
-      ),
-    );
-  const proposeKey = (chatId: string, tierId: string) => () => {
-    const chat = chats.find((c) => c.id === chatId);
-    if (!chat) return;
-    const tier = chat.tiers.find((t) => t.id === tierId);
-    if (!tier) return;
-    const threshold = chat.tiers.reduce((a, t) => a + clampNeed(t), 0);
-    const policy = chat.tiers.map((t) => `${clampNeed(t)}/${t.keys.length}`).join(" + ");
-    const newKey: SignerKey = { id: `k${Date.now()}`, initials: "?", name: "Proposed signer", device: "Pending ratification in chat", status: "proposed" };
-    setChats((prev) =>
-      prev.map((c) =>
-        c.id !== chatId ? c : { ...c, tiers: c.tiers.map((t) => (t.id !== tierId ? t : { ...t, keys: [...t.keys, newKey] })) },
-      ),
-    );
-    setApprovals((prev) => [
-      {
-        id: `rc${Date.now()}`,
-        kind: "role",
-        title: `Add signer to ${tier.name}`,
-        changeLabel: "Add signer — new key",
-        detail: `Proposed in ${chat.name}`,
-        tier: tier.name,
-        requestedBy: "You",
-        vault: chat.name,
-        time: "just now",
-        policy,
-        threshold,
-        total: threshold,
-        signed: 0,
-        youSigned: false,
-        status: "pending",
-      },
-      ...prev,
-    ]);
-  };
   // Persisted policy-change propose flow (mirrors submitSend): POST a kind:"role"
   // approval carrying the full proposedPolicy + diff, then announce in chat. We do
   // NOT send a signerSet and do NOT trust the threshold — the server pins it to the
@@ -741,7 +673,7 @@ export default function Wallet() {
     if (!text || !activeChat) return;
     if (text.toLowerCase() === "/send") {
       setDraft("");
-      setSendForm({ open: true, module: "Bitcoin regtest", dest: "", amount: "" });
+      setSendForm({ open: true, module: "Bitcoin regtest", dest: "", amount: "", silent: false });
       return;
     }
     const cid = activeChat;
@@ -800,18 +732,27 @@ export default function Wallet() {
     const threshold = chosen.length > 0 ? chosen.length : chat.tiers.reduce((a, t) => a + clampNeed(t), 0);
     const policy = chosen.length > 0 ? `${chosen.length} chosen signers` : chat.tiers.map((t) => `${clampNeed(t)}/${t.keys.length}`).join(" + ");
     const dest = sendForm.dest.trim();
+    const silent = sendForm.silent;
+    // A silent payment must go to a BIP-352 meta-address (tsp1…/sp1…); the real
+    // one-time output is derived from the spent inputs at broadcast.
+    if (silent && !/^(t)?sp1/i.test(dest)) {
+      setStateError("Silent payment needs a tsp1… address. Toggle Silent off to pay a normal bcrt1… address.");
+      return;
+    }
     const destShort = dest.length > 16 ? `${dest.slice(0, 8)}…${dest.slice(-4)}` : dest;
     const usd = btcPrice != null ? Math.round(amt * btcPrice).toLocaleString("en-US") : "";
     const cid = activeChat;
     const module = sendForm.module;
-    setSendForm({ open: false, module: "Bitcoin regtest", dest: "", amount: "" });
+    const rail = silent ? `${module} · stealth` : module;
+    setSendForm({ open: false, module: "Bitcoin regtest", dest: "", amount: "", silent: false });
     const proposal: Approval = {
       id: `tx${Date.now()}`,
       kind: "send",
-      title: `Transfer · ${module}`,
+      title: `Transfer · ${rail}`,
       dest: destShort,
-      destLabel: module,
+      destLabel: rail,
       recipientAddress: dest,
+      silent,
       amountSats: Math.round(amt * 1e8),
       btc: amt.toFixed(2),
       usd,
@@ -827,7 +768,9 @@ export default function Wallet() {
       // can be broadcast on-chain. Plain DMs (no receive address) stay mock.
       live: !!chat.receiveAddress,
     };
-    const announce = `Requested a transfer — ${amt} BTC to ${destShort} on ${module}. Needs a ${policy} quorum — please review and sign in Approvals.`;
+    const announce = silent
+      ? `Requested a silent payment — ${amt} BTC to ${destShort} (BIP-352 stealth) on ${module}. Needs a ${policy} quorum — please review and sign in Approvals.`
+      : `Requested a transfer — ${amt} BTC to ${destShort} on ${module}. Needs a ${policy} quorum — please review and sign in Approvals.`;
     void (async () => {
       const signerNpubs = chosen.map((p) => p.npub);
       const postBody = chosen.length > 0 ? { ...proposal, signerNpubs } : proposal;
@@ -874,7 +817,7 @@ export default function Wallet() {
   const titles: Record<Exclude<View, "chat">, [string, string]> = {
     overview: ["Overview", "Treasury at a glance"],
     approvals: ["Approvals", "Transactions awaiting a signing quorum"],
-    plan: ["Plan", "Your BTech subscription"],
+    plan: ["Plan", "Your Savara subscription"],
   };
   let pageTitle: string;
   let pageSub: string;
@@ -1008,9 +951,6 @@ export default function Wallet() {
               sendForm={sendForm}
               setSendForm={setSendForm}
               submitSend={submitSend}
-              setThreshold={setThreshold}
-              removeKey={removeKey}
-              proposeKey={proposeKey}
               proposePolicy={proposePolicyChange}
               onAuthorClick={(m) =>
                 m.npub &&
@@ -1092,7 +1032,7 @@ function Sidebar({
       <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "4px 8px 22px" }}>
         <div style={{ width: 34, height: 34, borderRadius: 9, background: C.orange, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 19, color: C.bg, fontFamily: MONO }}>₿</div>
         <div style={{ lineHeight: 1.05 }}>
-          <div style={{ fontWeight: 700, fontSize: 16, letterSpacing: "-.2px" }}>BTech</div>
+          <div style={{ fontWeight: 700, fontSize: 16, letterSpacing: "-.2px" }}>Savara</div>
           <div style={{ fontSize: 10.5, color: C.faint, letterSpacing: ".3px" }}>TREASURY VAULT</div>
         </div>
       </div>
@@ -1155,7 +1095,7 @@ function Sidebar({
       <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={{ background: "rgba(247,147,26,.07)", border: "1px solid rgba(247,147,26,.22)", borderRadius: 12, padding: "13px 14px" }}>
           <div style={{ fontSize: 11, color: C.sand, letterSpacing: ".3px", marginBottom: 6 }}>SELF-CUSTODY</div>
-          <div style={{ fontSize: 12.5, color: "#C5C9CE", lineHeight: 1.45 }}>No keys held by BTech. Your quorum, your coins.</div>
+          <div style={{ fontSize: 12.5, color: "#C5C9CE", lineHeight: 1.45 }}>No keys held by Savara. Your quorum, your coins.</div>
         </div>
         <div style={{ position: "relative", borderTop: `1px solid ${C.line}`, paddingTop: 11 }}>
           {menuOpen && (
@@ -1497,9 +1437,6 @@ function ChatDetail({
   sendForm,
   setSendForm,
   submitSend,
-  setThreshold,
-  removeKey,
-  proposeKey,
   proposePolicy,
   onAuthorClick,
   members,
@@ -1525,12 +1462,9 @@ function ChatDetail({
   draft: string;
   setDraft: (s: string) => void;
   onSendMsg: () => void;
-  sendForm: { open: boolean; module: string; dest: string; amount: string };
-  setSendForm: (f: { open: boolean; module: string; dest: string; amount: string }) => void;
+  sendForm: { open: boolean; module: string; dest: string; amount: string; silent: boolean };
+  setSendForm: (f: { open: boolean; module: string; dest: string; amount: string; silent: boolean }) => void;
   submitSend: () => void;
-  setThreshold: (chatId: string, tierId: string, delta: number) => () => void;
-  removeKey: (chatId: string, tierId: string, keyId: string) => () => void;
-  proposeKey: (chatId: string, tierId: string) => () => void;
   proposePolicy: (chatId: string) => (draft: PolicyConfig, diff: PolicyDiffItem[]) => void;
   onAuthorClick: (a: { npub: string; name: string; initials: string; color: string; role?: string }) => void;
   members: { npub: string; label: string; role: string; initials: string; color: string }[];
@@ -1553,6 +1487,7 @@ function ChatDetail({
             {chat.name}
             {chat.live && <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: ".4px", color: C.green, background: "rgba(63,185,80,.12)", padding: "2px 7px", borderRadius: 20 }}>LIVE</span>}
             {chat.receiveAddress && <AddressChip address={chat.receiveAddress} />}
+            {chat.live && <MetaAddressChip />}
           </div>
           <div style={{ fontSize: 11.5, color: C.faint2, display: "flex", alignItems: "center", gap: 7, marginTop: 2 }}>
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }} />
@@ -1650,60 +1585,85 @@ function ChatDetail({
           </div>
           <div style={{ flex: "0 0 auto", borderTop: `1px solid ${C.line}`, padding: "14px 16px" }}>
             {hasVault && sendForm.open && (
-              <div style={{ background: "#0E1014", border: "1px solid rgba(247,147,26,.3)", borderRadius: 12, padding: 14, marginBottom: 12 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <div style={{ background: "#0E1014", border: "1px solid rgba(247,147,26,.3)", borderRadius: 12, marginBottom: 12, display: "flex", flexDirection: "column", maxHeight: "min(46vh, 460px)", overflow: "hidden" }}>
+                <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 14px 10px" }}>
                   <span style={{ fontSize: 12.5, fontWeight: 600, color: C.orange }}>Propose a BTC transfer</span>
-                  <button onClick={() => setSendForm({ open: false, module: "Bitcoin regtest", dest: "", amount: "" })} title="Cancel" style={{ width: 22, height: 22, border: "none", background: "transparent", color: C.faint2, fontSize: 16, cursor: "pointer", fontFamily: "inherit" }}>×</button>
+                  <button onClick={() => setSendForm({ open: false, module: "Bitcoin regtest", dest: "", amount: "", silent: false })} title="Cancel" style={{ width: 22, height: 22, border: "none", background: "transparent", color: C.faint2, fontSize: 16, cursor: "pointer", fontFamily: "inherit" }}>×</button>
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  <Field label="CHAIN / MODULE">
-                    <select value={sendForm.module} onChange={(e) => setSendForm({ ...sendForm, module: e.target.value })} style={inputStyle}>
-                      <option>Bitcoin regtest</option>
-                      <option>Lightning</option>
-                      <option>Liquid</option>
-                    </select>
-                  </Field>
-                  <Field label="DESTINATION">
-                    <input value={sendForm.dest} onChange={(e) => setSendForm({ ...sendForm, dest: e.target.value })} placeholder="bcrt1q… address or invoice" style={{ ...inputStyle, fontFamily: MONO }} />
-                  </Field>
-                  <Field label="AMOUNT (BTC)">
-                    <input value={sendForm.amount} onChange={(e) => setSendForm({ ...sendForm, amount: e.target.value })} inputMode="decimal" placeholder="0.00" style={{ ...inputStyle, fontFamily: MONO }} />
-                  </Field>
-                </div>
-                <div style={{ marginTop: 10 }}>
-                  <div style={{ fontSize: 11, color: C.faint, marginBottom: 6 }}>
-                    Signers ({signerPick.size} chosen · all must sign)
+                <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 14px 12px" }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    <Field label="CHAIN / MODULE">
+                      <select value={sendForm.module} onChange={(e) => setSendForm({ ...sendForm, module: e.target.value })} style={inputStyle}>
+                        <option>Bitcoin regtest</option>
+                        <option>Arkade</option>
+                      </select>
+                    </Field>
+                    <Field label="PRIVACY">
+                      <div style={{ display: "flex", gap: 6 }}>
+                        {[
+                          { on: !sendForm.silent, label: "Standard", val: false, accent: C.orange, soft: "rgba(247,147,26,.12)" },
+                          { on: sendForm.silent, label: "Silent · stealth", val: true, accent: "#A78BFA", soft: "rgba(167,139,250,.14)" },
+                        ].map((opt) => (
+                          <button
+                            key={opt.label}
+                            type="button"
+                            onClick={() => setSendForm({ ...sendForm, silent: opt.val })}
+                            style={{ flex: 1, padding: "8px 10px", fontSize: 12, fontWeight: 600, fontFamily: "inherit", cursor: "pointer", borderRadius: 8, border: `1px solid ${opt.on ? opt.accent : C.line2}`, background: opt.on ? opt.soft : "transparent", color: opt.on ? opt.accent : C.faint2 }}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </Field>
+                    <Field label="DESTINATION">
+                      <input value={sendForm.dest} onChange={(e) => setSendForm({ ...sendForm, dest: e.target.value })} placeholder={sendForm.silent ? "tsp1… silent-payment address" : "bcrt1q… address or invoice"} style={{ ...inputStyle, fontFamily: MONO }} />
+                      {sendForm.silent && (
+                        <div style={{ fontSize: 10, color: "#A78BFA", marginTop: 5, lineHeight: 1.5 }}>
+                          One reusable BIP-352 address. The real one-time output is derived from the vault inputs at broadcast — unlinkable on-chain.
+                        </div>
+                      )}
+                    </Field>
+                    <Field label="AMOUNT (BTC)">
+                      <input value={sendForm.amount} onChange={(e) => setSendForm({ ...sendForm, amount: e.target.value })} inputMode="decimal" placeholder="0.00" style={{ ...inputStyle, fontFamily: MONO }} />
+                    </Field>
                   </div>
-                  {personas.map((p) => {
-                    const on = signerPick.has(p.participant_id);
-                    return (
-                      <label key={p.participant_id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "3px 0", cursor: "pointer" }}>
-                        <input
-                          type="checkbox"
-                          checked={on}
-                          onChange={() =>
-                            setSignerPick((prev) => {
-                              const next = new Set(prev);
-                              if (on) next.delete(p.participant_id);
-                              else next.add(p.participant_id);
-                              return next;
-                            })
-                          }
-                        />
-                        <span>{p.label}</span>
-                        <span style={{ color: C.faint }}>· {p.role} · #{p.participant_id}</span>
-                      </label>
-                    );
-                  })}
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ fontSize: 11, color: C.faint, marginBottom: 6 }}>
+                      Signers ({signerPick.size} chosen · all must sign)
+                    </div>
+                    {personas.map((p) => {
+                      const on = signerPick.has(p.participant_id);
+                      return (
+                        <label key={p.participant_id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "3px 0", cursor: "pointer" }}>
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            onChange={() =>
+                              setSignerPick((prev) => {
+                                const next = new Set(prev);
+                                if (on) next.delete(p.participant_id);
+                                else next.add(p.participant_id);
+                                return next;
+                              })
+                            }
+                          />
+                          <span>{p.label}</span>
+                          <span style={{ color: C.faint }}>· {p.role} · #{p.participant_id}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
                 </div>
-                <button onClick={submitSend} style={{ width: "100%", marginTop: 12, background: C.orange, border: "none", color: C.bg, fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", padding: 10, borderRadius: 8, cursor: "pointer" }}>
-                  Request signatures from {quorum}
-                </button>
+                <div style={{ flex: "0 0 auto", padding: "10px 14px 14px", borderTop: `1px solid ${C.line}` }}>
+                  <button onClick={submitSend} style={{ width: "100%", background: C.orange, border: "none", color: C.bg, fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", padding: 10, borderRadius: 8, cursor: "pointer" }}>
+                    Request signatures from {quorum}
+                  </button>
+                </div>
               </div>
             )}
             <div style={{ display: "flex", gap: 8, alignItems: "center", background: C.surface2, border: "1px solid rgba(255,255,255,.08)", borderRadius: 11, padding: "6px 6px 6px 8px" }}>
               {hasVault && (
-                <button onClick={() => setSendForm({ open: true, module: "Bitcoin regtest", dest: "", amount: "" })} title="Propose a BTC transfer" style={{ flex: "0 0 auto", width: 34, height: 34, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "rgba(247,147,26,.14)", color: C.orange, borderRadius: 8, cursor: "pointer", fontFamily: MONO, fontSize: 17, fontWeight: 700 }}>₿</button>
+                <button onClick={() => setSendForm({ open: true, module: "Bitcoin regtest", dest: "", amount: "", silent: false })} title="Propose a BTC transfer" style={{ flex: "0 0 auto", width: 34, height: 34, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "rgba(247,147,26,.14)", color: C.orange, borderRadius: 8, cursor: "pointer", fontFamily: MONO, fontSize: 17, fontWeight: 700 }}>₿</button>
               )}
               <input value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); onSendMsg(); } }} placeholder={`Message ${chat.name}`} style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", outline: "none", color: C.ink, fontSize: 13, fontFamily: "inherit" }} />
               <button onClick={onSendMsg} style={{ flex: "0 0 auto", background: C.orange, border: "none", color: C.bg, fontSize: 13, fontWeight: 600, fontFamily: "inherit", padding: "8px 18px", borderRadius: 8, cursor: "pointer" }}>Send</button>
@@ -1721,9 +1681,6 @@ function ChatDetail({
         {showVault && hasVault && (
           <VaultPanel
             chat={chat}
-            setThreshold={setThreshold}
-            removeKey={removeKey}
-            proposeKey={proposeKey}
             roster={personas.map((p) => ({ npub: p.npub, label: p.label, participantId: p.participant_id }))}
             onProposePolicy={proposePolicy}
           />
@@ -1825,6 +1782,63 @@ function AddressChip({ address }: { address: string }) {
       <span aria-hidden style={{ fontSize: 12 }}>
         {copied ? "✓" : "⧉"}
       </span>
+    </button>
+  );
+}
+
+// The treasury's one reusable BIP-352 silent-payment address (tsp1…). Shown next
+// to the L1/Arkade receive address so anyone can copy it — one static address,
+// every payment to it lands on a fresh, unlinkable output. Fetched once from
+// /api/stealth (the published meta-address; B_scan‖B_spend).
+function MetaAddressChip() {
+  const [meta, setMeta] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/stealth")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { metaAddress?: string } | null) => {
+        if (alive && d?.metaAddress) setMeta(d.metaAddress);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+  if (!meta) return null;
+  const short = `${meta.slice(0, 10)}…${meta.slice(-5)}`;
+  const copy = () => {
+    navigator.clipboard?.writeText(meta).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      },
+      () => {},
+    );
+  };
+  return (
+    <button
+      onClick={copy}
+      title={copied ? "Copied" : `Silent-payment address — one reusable BIP-352 address, every payment unlinkable. Copy:\n${meta}`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        background: "rgba(167,139,250,.08)",
+        border: `1px solid ${copied ? "rgba(63,185,80,.4)" : "rgba(167,139,250,.35)"}`,
+        color: copied ? C.green : "#C4B5FD",
+        fontFamily: MONO,
+        fontSize: 11.5,
+        fontWeight: 500,
+        padding: "3px 9px",
+        borderRadius: 7,
+        cursor: "pointer",
+        maxWidth: "100%",
+      }}
+    >
+      <span style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: ".4px", color: "#A78BFA", background: "rgba(167,139,250,.16)", padding: "1px 5px", borderRadius: 20 }}>STEALTH</span>
+      {copied ? "Copied" : short}
+      <span aria-hidden style={{ fontSize: 12 }}>{copied ? "✓" : "⧉"}</span>
     </button>
   );
 }
@@ -2049,27 +2063,19 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 function VaultPanel({
   chat,
-  setThreshold,
-  removeKey,
-  proposeKey,
   roster,
   onProposePolicy,
 }: {
   chat: Chat;
-  setThreshold: (chatId: string, tierId: string, delta: number) => () => void;
-  removeKey: (chatId: string, tierId: string, keyId: string) => () => void;
-  proposeKey: (chatId: string, tierId: string) => () => void;
   roster: { npub: string; label: string; participantId: number }[];
   onProposePolicy: (chatId: string) => (draft: PolicyConfig, diff: PolicyDiffItem[]) => void;
 }) {
-  const quorum = quorumOf(chat.tiers);
   const multiTier = chat.tiers.length > 1;
   return (
     <div style={{ flex: "0 0 348px", width: 348, display: "flex", flexDirection: "column", background: "#101216", border: `1px solid ${C.line2}`, borderRadius: 16, overflowY: "auto" }}>
       <div style={{ padding: "18px 20px", borderBottom: `1px solid ${C.line}` }}>
         <div style={{ fontSize: 11, color: C.sand, letterSpacing: ".4px" }}>VAULT POLICY</div>
         <div style={{ fontFamily: MONO, fontSize: 12, color: "#9CA1A7", marginTop: 8, lineHeight: 1.5 }}>{spendOf(chat.tiers)}</div>
-        <div style={{ fontSize: 10.5, color: C.faint, marginTop: 8 }}>Set each tier&apos;s required signers with the steppers below</div>
         {chat.live && (
           <div style={{ fontSize: 10.5, color: C.green, marginTop: 8, lineHeight: 1.5 }}>Live DKGKit vault. Receive {shortHex(chat.receiveAddress ?? "")} · group key {shortHex(chat.groupKey ?? "")}. Threshold edits here are proposals — applying them re-runs DKG.</div>
         )}
@@ -2077,63 +2083,16 @@ function VaultPanel({
           <div style={{ fontSize: 10.5, color: C.sand, marginTop: 8, lineHeight: 1.5 }}>Each signer belongs to one tier only — a member of one tier can&apos;t satisfy the other. Both quorums are required.</div>
         )}
       </div>
-      <div style={{ padding: "18px 20px", display: "flex", flexDirection: "column", gap: 18 }}>
-        {chat.tiers.map((tier) => (
-          <div key={tier.id}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{tier.name}</div>
-                <div style={{ fontSize: 11, color: C.faint2 }}>{tier.short} tier</div>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                <Stepper onClick={setThreshold(chat.id, tier.id, -1)} title="Fewer required signers">−</Stepper>
-                <span style={{ fontFamily: MONO, fontSize: 13, fontWeight: 600, color: C.orange, whiteSpace: "nowrap", minWidth: 46, textAlign: "center" }}>{clampNeed(tier)} of {tier.keys.length}</span>
-                <Stepper onClick={setThreshold(chat.id, tier.id, 1)} title="More required signers">+</Stepper>
-              </div>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
-              {tier.keys.map((k) => {
-                const proposed = k.status === "proposed";
-                return (
-                  <div key={k.id} style={{ display: "flex", alignItems: "center", gap: 10, background: proposed ? "rgba(247,147,26,.05)" : "#0E1014", border: `1px ${proposed ? "dashed" : "solid"} ${proposed ? "rgba(247,147,26,.4)" : C.line2}`, borderRadius: 10, padding: "9px 11px" }}>
-                    <span style={{ width: 28, height: 28, borderRadius: 8, background: proposed ? "rgba(247,147,26,.18)" : "#23262B", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 600, color: "#C5C9CE", flex: "0 0 28px" }}>{k.initials}</span>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 12.5, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{k.name}</div>
-                      <div style={{ fontSize: 10.5, color: C.faint2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{k.device}</div>
-                    </div>
-                    {proposed && <span style={{ fontSize: 8.5, fontWeight: 600, letterSpacing: ".3px", color: C.sand, background: "rgba(247,147,26,.14)", padding: "3px 6px", borderRadius: 20, whiteSpace: "nowrap" }}>PROPOSED</span>}
-                    {!proposed && <span style={{ width: 8, height: 8, borderRadius: "50%", background: STATUS_COLOR[k.status], flex: "0 0 8px" }} title={statusLabelOf(k)} />}
-                    <button onClick={removeKey(chat.id, tier.id, k.id)} title="Remove signer" style={{ width: 20, height: 20, flex: "0 0 20px", display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "transparent", color: "#5E6369", fontSize: 15, lineHeight: 1, borderRadius: 6, cursor: "pointer", fontFamily: "inherit" }}>×</button>
-                  </div>
-                );
-              })}
-              <button onClick={proposeKey(chat.id, tier.id)} style={{ width: "100%", background: "transparent", border: "1px dashed rgba(247,147,26,.4)", color: C.sand, borderRadius: 10, padding: 9, fontSize: 12, fontWeight: 500, fontFamily: "inherit", cursor: "pointer" }}>+ Propose new signer</button>
-            </div>
-          </div>
-        ))}
-        <div style={{ background: "rgba(247,147,26,.07)", border: "1px solid rgba(247,147,26,.22)", borderRadius: 12, padding: "14px 16px" }}>
-          <div style={{ fontFamily: MONO, fontSize: 20, fontWeight: 600, color: C.orange }}>{quorum}</div>
-          <div style={{ fontSize: 11, color: C.sand, marginTop: 3 }}>required from each tier · quorums never overlap</div>
-        </div>
-        <div style={{ fontSize: 11, color: C.faint2, lineHeight: 1.5 }}>Adding or removing a signer is proposed and ratified by the group in this chat — there is no fixed rulebook.</div>
-        <div style={{ borderTop: `1px solid ${C.line}`, paddingTop: 16 }}>
-          <div style={{ fontSize: 11, color: C.sand, letterSpacing: ".4px", marginBottom: 12 }}>PROPOSE A POLICY CHANGE</div>
-          <PolicyEditor
-            current={chatToPolicyConfig(chat, roster)}
-            roster={roster}
-            onPropose={onProposePolicy(chat.id)}
-          />
-        </div>
+      <div style={{ padding: "18px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ fontSize: 11, color: C.sand, letterSpacing: ".4px" }}>PROPOSE A POLICY CHANGE</div>
+        <div style={{ fontSize: 10.5, color: C.faint2, lineHeight: 1.5 }}>Edit each tier&apos;s required signers, add or remove signers and tiers, then propose — the change is ratified by the group in this chat. There is no fixed rulebook.</div>
+        <PolicyEditor
+          current={chatToPolicyConfig(chat, roster)}
+          roster={roster}
+          onPropose={onProposePolicy(chat.id)}
+        />
       </div>
     </div>
-  );
-}
-
-function Stepper({ onClick, title, children }: { onClick: () => void; title: string; children: React.ReactNode }) {
-  return (
-    <button onClick={onClick} title={title} style={{ width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center", border: "1px solid rgba(255,255,255,.12)", background: "transparent", color: "#C5C9CE", borderRadius: 7, cursor: "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1 }}>
-      {children}
-    </button>
   );
 }
 

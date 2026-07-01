@@ -108,7 +108,7 @@ export default function LoginForm() {
       }}
     >
       <div style={{ width: 380, padding: 28, background: C.surface, border: `1px solid ${C.line}`, borderRadius: 14 }}>
-        <h1 style={{ fontSize: 18, margin: 0 }}>BTech DKGKit Console</h1>
+        <h1 style={{ fontSize: 18, margin: 0 }}>Savara DKGKit Console</h1>
         <p style={{ color: C.muted, fontSize: 13, marginTop: 6 }}>
           Sign in with a Nostr key to access the vault.
         </p>

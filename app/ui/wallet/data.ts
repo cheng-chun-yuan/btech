@@ -141,7 +141,7 @@ export function buildLiveVault(state: WalletState): Chat {
     messages: [
       { id: "m1", who: "Ana Rivera", handle: "npub1qz…ops", initials: "AR", color: "#F7931A", time: "09:24", text: "Vendor payment to Blockstream is queued — 2.4 BTC. Please sign when you have a moment.", signed: false, zaps: "⚡︎ 3 zaps" },
       { id: "m2", who: "Maya Ksiazek", handle: "npub1c8…ceo", initials: "MK", color: "#6FB1FF", time: "09:31", text: "Reviewed the destination, it is whitelisted. Signing from my Coldcard now.", signed: true, zaps: "" },
-      { id: "m3", who: "BTech", handle: "dkgkit", initials: "₿", color: "#F7931A", time: "now", text: `This vault is live. Group key ${shortKey(demo.group_xonly_public_key)} · receive ${shortKey(demo.receive_address)} on ${demo.network}. Signing runs a real grouped HTSS round and verifies the aggregate Schnorr signature under BIP340.`, signed: true, zaps: "" },
+      { id: "m3", who: "Savara", handle: "dkgkit", initials: "₿", color: "#F7931A", time: "now", text: `This vault is live. Group key ${shortKey(demo.group_xonly_public_key)} · receive ${shortKey(demo.receive_address)} on ${demo.network}. Signing runs a real grouped HTSS round and verifies the aggregate Schnorr signature under BIP340.`, signed: true, zaps: "" },
     ],
   };
 }

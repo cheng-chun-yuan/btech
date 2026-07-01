@@ -6,7 +6,7 @@ import { getDb } from "../_lib/db";
 import { getSessionUser, SESSION_COOKIE } from "../_lib/auth";
 import { recordAudit, resolveChatId, isMember } from "../_lib/audit";
 import { resolveSignerSet, defaultSignerSet } from "../_lib/governance";
-import { runVaultQuorum } from "../_lib/btech";
+import { runVaultQuorum, runSessionProof } from "../_lib/btech";
 import { isBrickedPolicy } from "./policy-validate";
 import type { Approval } from "../../ui/wallet/types";
 
@@ -29,6 +29,20 @@ export async function GET() {
     return { ...a, signed, youSigned };
   });
   return NextResponse.json({ approvals });
+}
+
+/** Σ each grouped tier's `required` for the canonical treasury policy, read from
+ * the one-shot DKGKit CLI proof. Unlike `runVaultQuorum` this needs no live
+ * vaultd HTTP service, so a policy change can be PROPOSED against the canonical
+ * vault even on a dev tree with vaultd down. Returns 0 (→ caller fails closed)
+ * if the proof can't be produced. */
+async function canonicalTreasuryQuorum(): Promise<number> {
+  try {
+    const proof = await runSessionProof("btech-policy-quorum");
+    return proof.vault_policy_groups.reduce((sum, g) => sum + (g.required ?? 0), 0);
+  } catch {
+    return 0;
+  }
 }
 
 export async function POST(request: Request) {
@@ -124,11 +138,25 @@ export async function POST(request: Request) {
     // bypass (a proposer could land threshold = 1 and self-ratify the reshare).
     // Drop any signerSet and derive the quorum server-side: prefer the sum of the
     // current policy tiers' minNeed; for the live treasury vault (tiers NOT mirrored
-    // into the web DB → sum 0) source it AUTHORITATIVELY from vaultd's grouped_config.
-    // If neither yields a quorum we FAIL CLOSED with 400 rather than trust the client.
+    // into the web DB → sum 0) source it AUTHORITATIVELY from vaultd's grouped_config,
+    // falling back to the one-shot DKGKit CLI proof for the canonical (never-reshared)
+    // treasury when vaultd's HTTP service is down (see below). If none yields a quorum
+    // we FAIL CLOSED with 400 rather than trust the client.
     delete approval.signerSet;
     let quorum = (meta?.tiers ?? []).reduce((sum, t) => sum + (t.minNeed ?? 0), 0);
     if (!quorum) quorum = (await runVaultQuorum(chatId)) ?? 0;
+    // Last resort for the canonical (never-reshared) live treasury when vaultd's
+    // long-lived HTTP service is down: a reshare can only be applied THROUGH
+    // vaultd, and applying one mirrors the new tiers into the chat and bumps
+    // policyVersion (see app/api/approvals/[id]/sign/route.ts). So empty tiers
+    // + policyVersion 0 PROVES the policy is still the canonical grouped HTSS
+    // config — derive the quorum from the SAME authoritative one-shot DKGKit CLI
+    // proof the UI renders the live policy from (Σ each grouped tier's
+    // `required`). Still never trusts the client; fails closed if the proof
+    // can't be produced.
+    if (!quorum && chatId === "treasury" && (meta?.policyVersion ?? 0) === 0) {
+      quorum = await canonicalTreasuryQuorum();
+    }
     if (!quorum || quorum < 1) {
       return NextResponse.json(
         { error: "Cannot determine the current policy quorum for this vault." },

@@ -189,6 +189,28 @@ export function decodeSilentPaymentAddress(addr: string): MetaAddress {
     };
 }
 
+// ── BIP-341 P2TR (witness v1) address — the on-chain form of a derived output ──
+// A BIP-352 derived output `P_k` is used DIRECTLY as the taproot output key (no
+// extra BIP341 tweak), so `x(P_k)` IS the scriptPubKey key. These encode/decode
+// that x-only key as the `bc1p…`/`tb1p…`/`bcrt1p…` address vaultd pays / spends.
+
+/** Encode a 32-byte x-only taproot output key as a witness-v1 (P2TR) address.
+ * `hrp`: "bc" mainnet · "tb" testnet/signet · "bcrt" regtest. */
+export function encodeP2TR(xonlyHex: string, hrp = "bcrt"): string {
+    const program = hexToBytes(xonlyHex);
+    if (program.length !== 32)
+        throw new Error("p2tr program must be 32 bytes (x-only)");
+    return bech32m.encode(hrp as "bc", [1, ...bech32m.toWords(program)], 1023); // leading word 1 = witness v1
+}
+/** Decode a witness-v1 (P2TR) address into its 32-byte x-only output key (hex). */
+export function decodeP2TR(addr: string): string {
+    const { words } = bech32m.decode(addr as `bc1${string}`, 1023);
+    if (words[0] !== 1) throw new Error("not a witness-v1 (P2TR) address");
+    const program = bech32m.fromWords(words.slice(1));
+    if (program.length !== 32) throw new Error("p2tr program must be 32 bytes");
+    return bytesToHex(program);
+}
+
 // ── BIP-352 shared secret ───────────────────────────────────────────────────
 
 function aSum(privs: bigint[], taproot: boolean): bigint {

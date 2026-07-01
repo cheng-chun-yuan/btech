@@ -2,11 +2,31 @@ import type { DB } from "./db";
 import { recordAudit } from "./audit";
 import { runDemo, runSettle, type SettlementInput } from "./btech";
 import { addressUtxos, broadcastTx } from "./esplora";
+import {
+  deriveInternalSend,
+  ingestCandidate,
+  type InternalSendDerivation,
+} from "../../../lib/silentpayment/treasury";
+import { decodeP2TR } from "../../../lib/silentpayment/crypto";
 import type { Chat } from "../../ui/wallet/types";
 
 export const DEFAULT_FEE_SATS = 1000;
 
-export type SettleResult = { txid: string; changeSats: number; inputs: number; vaultAddress: string };
+export type SettleResult = {
+  txid: string;
+  changeSats: number;
+  inputs: number;
+  vaultAddress: string;
+  /** The actual on-chain recipient — the derived P2TR output for a silent send. */
+  recipient: string;
+  /** True when the requested recipient was a BIP-352 silent-payment address. */
+  silent: boolean;
+};
+
+/** A silent-payment recipient is a `tsp1…`/`sp1…` meta-address, not a script. */
+function isSilentAddress(addr: string): boolean {
+  return /^(t)?sp1/i.test(addr.trim());
+}
 
 /**
  * Settle a real on-chain transfer out of a vault: select its confirmed UTXOs,
@@ -55,8 +75,45 @@ export async function settleVault(
     throw new Error(`insufficient confirmed funds: have ${total} sats, need ${need}`);
   }
 
-  const report = await runSettle({ recipient: params.recipient, amountSats, feeSats, inputs }, params.vaultId);
+  // Silent payment (BIP-352): the recipient is a `tsp1…` meta-address, not a
+  // spendable script. Derive the one-time taproot output P from the inputs being
+  // spent (receiver-side ECDH — internal addresses whose scan key we hold) and
+  // pay THAT; the recipient detects it later with their scan key. Fail closed for
+  // any address we can't derive (an external tsp1).
+  let recipient = params.recipient;
+  let stealth: InternalSendDerivation | null = null;
+  let stealthInputs: { userPK: string; vtxoId: string }[] = [];
+  if (isSilentAddress(recipient)) {
+    const vaultXOnly = decodeP2TR(vaultAddress);
+    const hrp = vaultAddress.slice(0, vaultAddress.indexOf("1"));
+    const outpoints = inputs.map((i) => ({ txid: i.txid, vout: i.vout }));
+    stealth = deriveInternalSend({ tsp1: recipient, vaultXOnly, outpoints, hrp });
+    if (!stealth) {
+      throw new Error(
+        "silent payment: this vault doesn't hold the scan key for that address (only the treasury's own stealth address is supported here)",
+      );
+    }
+    stealthInputs = inputs.map((i) => ({ userPK: `02${vaultXOnly}`, vtxoId: `${i.txid}:${i.vout}` }));
+    recipient = stealth.derivedAddress;
+  }
+
+  const report = await runSettle({ recipient, amountSats, feeSats, inputs }, params.vaultId);
   const txid = await broadcastTx(report.raw_tx_hex);
+
+  // Model the operator stream so the recipient's view-key scanner detects the
+  // inbound stealth payment (surfaced in the /api/stealth inbox). Best-effort:
+  // detection is a demo convenience, never fail a real broadcast over it.
+  if (stealth) {
+    try {
+      ingestCandidate({
+        vtxId: txid,
+        inputs: stealthInputs,
+        outputs: [{ xonly: stealth.xonly, amount: amountSats, leafIndex: stealth.k }],
+      });
+    } catch {
+      // ignore — the spend already broadcast on-chain
+    }
+  }
 
   recordAudit(db, {
     chatId: params.vaultId,
@@ -64,8 +121,10 @@ export async function settleVault(
     actorLabel: params.actorLabel,
     action: "sign",
     outcome: "success",
-    detail: `Broadcast ${(amountSats / 1e8).toFixed(8)} BTC to ${params.recipient} on-chain — tx ${txid}`,
+    detail: stealth
+      ? `Broadcast ${(amountSats / 1e8).toFixed(8)} BTC silently (${params.recipient} → ${recipient}) on-chain — tx ${txid}`
+      : `Broadcast ${(amountSats / 1e8).toFixed(8)} BTC to ${recipient} on-chain — tx ${txid}`,
   });
 
-  return { txid, changeSats: report.change_sats, inputs: inputs.length, vaultAddress };
+  return { txid, changeSats: report.change_sats, inputs: inputs.length, vaultAddress, recipient, silent: !!stealth };
 }
