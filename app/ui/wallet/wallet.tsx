@@ -1595,7 +1595,7 @@ function ChatDetail({
                     <Field label="CHAIN / MODULE">
                       <select value={sendForm.module} onChange={(e) => setSendForm({ ...sendForm, module: e.target.value })} style={inputStyle}>
                         <option>Bitcoin regtest</option>
-                        <option>Arkade</option>
+                        <option disabled>Arkade (modeled · Phase 2)</option>
                       </select>
                     </Field>
                     <Field label="PRIVACY">
