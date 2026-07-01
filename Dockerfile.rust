@@ -1,0 +1,18 @@
+# Build btech-vaultd from source with git-pinned dkgkit (no sibling checkout).
+FROM rust:1.86-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      pkg-config libssl-dev git ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY tests ./tests
+RUN cargo build --release --bin vaultd
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/vaultd /usr/local/bin/vaultd
+ENV BTECH_VAULTD_HOST=0.0.0.0 BTECH_VAULTD_PORT=8787 BTECH_VAULTD_DATA=/data
+VOLUME /data
+EXPOSE 8787
+CMD ["vaultd"]
