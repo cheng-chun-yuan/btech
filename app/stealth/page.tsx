@@ -2,10 +2,14 @@
 import { useEffect, useState } from "react";
 
 type Payment = {
+  source?: "onchain" | "modeled";
   P: string;
   amount: number;
-  vtxId: string;
-  leafIndex: number;
+  vtxId?: string;
+  leafIndex?: number;
+  txid?: string;
+  vout?: number;
+  blockHeight?: number;
 };
 
 const card: React.CSSProperties = {
@@ -142,40 +146,57 @@ export default function StealthPage() {
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {inbound.map((p) => (
-                <div
-                  key={p.vtxId + p.P}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    background: "#0d1117",
-                    border: "1px solid #1c2230",
-                    borderRadius: 8,
-                    padding: "10px 14px",
-                  }}
-                >
-                  <div
-                    style={{
-                      fontFamily: "ui-monospace, monospace",
-                      fontSize: 12,
-                      color: "#8b94a7",
-                    }}
-                  >
-                    P {p.P.slice(0, 10)}…{p.P.slice(-6)}
-                  </div>
-                  <div style={{ fontVariantNumeric: "tabular-nums", fontSize: 14 }}>
-                    +{p.amount.toLocaleString()} sats
-                  </div>
-                </div>
-              ))}
+  <div
+    key={(p.txid ?? p.vtxId ?? "") + ":" + p.P}
+    style={{
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      background: "#0d1117",
+      border: "1px solid #1c2230",
+      borderRadius: 8,
+      padding: "10px 14px",
+    }}
+  >
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span
+          style={{
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: 0.4,
+            padding: "2px 6px",
+            borderRadius: 4,
+            color: p.source === "onchain" ? "#7fd1b9" : "#c7a3ff",
+            border: `1px solid ${p.source === "onchain" ? "#2a4d43" : "#3a2d55"}`,
+          }}
+        >
+          {p.source === "onchain" ? "ON-CHAIN L1" : "MODELED"}
+        </span>
+        <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#8b94a7" }}>
+          P {p.P.slice(0, 10)}…{p.P.slice(-6)}
+        </span>
+      </div>
+      {p.txid && (
+        <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#5b6273" }}>
+          tx {p.txid.slice(0, 12)}…:{p.vout}
+        </span>
+      )}
+    </div>
+    <div style={{ fontVariantNumeric: "tabular-nums", fontSize: 14 }}>
+      +{p.amount.toLocaleString()} sats
+    </div>
+  </div>
+))}
             </div>
           )}
         </div>
 
         <p style={{ color: "#5b6273", fontSize: 12, marginTop: 16 }}>
-          Detection runs on a delegated view key (detect-only — it can never
-          spend). On Arkade these payments are off-chain VTXOs; the feed is the
-          recipient side of the same flow proven live in the SDK example.
+          Detection runs on a delegated view key (detect-only — it can never spend).
+          <strong> ON-CHAIN L1</strong> items are real regtest taproot outputs found by
+          block-walking with the view key. <strong>MODELED</strong> items simulate the
+          operator stream (the Arkade off-chain rail lands in Phase 2).
         </p>
       </div>
     </main>
