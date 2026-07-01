@@ -451,6 +451,7 @@ dependencies = [
 [[package]]
 name = "dkgkit-bitcoin"
 version = "0.1.0"
+source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=751ed81#751ed81e86a6409a7d86426cb808b0f04e67ad1f"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -463,6 +464,7 @@ dependencies = [
 [[package]]
 name = "dkgkit-core"
 version = "0.1.0"
+source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=751ed81#751ed81e86a6409a7d86426cb808b0f04e67ad1f"
 dependencies = [
  "serde",
  "serde_json",
@@ -472,6 +474,7 @@ dependencies = [
 [[package]]
 name = "dkgkit-frost"
 version = "0.1.0"
+source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=751ed81#751ed81e86a6409a7d86426cb808b0f04e67ad1f"
 dependencies = [
  "bincode 1.3.3",
  "dkgkit-core",
@@ -487,6 +490,7 @@ dependencies = [
 [[package]]
 name = "dkgkit-nostr"
 version = "0.1.0"
+source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=751ed81#751ed81e86a6409a7d86426cb808b0f04e67ad1f"
 dependencies = [
  "dkgkit-core",
  "dkgkit-transport",
@@ -499,6 +503,7 @@ dependencies = [
 [[package]]
 name = "dkgkit-sdk"
 version = "0.1.0"
+source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=751ed81#751ed81e86a6409a7d86426cb808b0f04e67ad1f"
 dependencies = [
  "dkgkit-bitcoin",
  "dkgkit-core",
@@ -509,6 +514,7 @@ dependencies = [
 [[package]]
 name = "dkgkit-transport"
 version = "0.1.0"
+source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=751ed81#751ed81e86a6409a7d86426cb808b0f04e67ad1f"
 dependencies = [
  "dkgkit-core",
 ]

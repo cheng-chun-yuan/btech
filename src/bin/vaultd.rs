@@ -292,8 +292,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/vault/settle", post(vault_settle))
         .with_state(state);
 
+    let host = std::env::var("BTECH_VAULTD_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = std::env::var("BTECH_VAULTD_PORT").unwrap_or_else(|_| "8787".to_string());
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     eprintln!("btech-vaultd listening on http://{addr}");
     axum::serve(listener, router).await?;
