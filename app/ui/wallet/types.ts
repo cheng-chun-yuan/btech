@@ -216,3 +216,28 @@ export type WalletState = {
   demo: DemoReport;
   session: SessionProofReport;
 };
+
+export type View = "overview" | "approvals" | "chat" | "plan";
+export type Tab = "send" | "admin";
+
+export type AuditEntryUI = {
+  id: string;
+  actor_label: string;
+  action: "propose" | "sign" | "message" | "join";
+  outcome: "success" | "failed" | null;
+  detail: string | null;
+  created_at: number;
+};
+
+// On-chain activity derived from /api/chain/activity (real esplora tx history).
+export type ActivityApiEntry = {
+  txid: string;
+  address: string;
+  direction: "in" | "out";
+  deltaSats: number;
+  confirmed: boolean;
+  blockHeight: number | null;
+  blockTime: number | null;
+  txUrl: string;
+};
+export type ActivityRow = ActivityApiEntry & { vault: string };

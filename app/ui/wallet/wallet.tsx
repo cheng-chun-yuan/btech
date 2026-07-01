@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
 import { finalizeEvent } from "nostr-tools";
 import type { EventTemplate } from "nostr-tools";
 
@@ -13,46 +12,20 @@ import { resolveSigner, type NostrSigner } from "./nostr-signer";
 import { NostrChatClient, relayUrl, scopeFor, type DecryptedMessage } from "./nostr-chat";
 import { mergeNewChats } from "./chat-merge";
 import { PolicyEditor } from "./policy-editor";
+import { C, MONO, SANS, inputStyle } from "./lib/theme";
 import type {
   Approval,
+  ActivityApiEntry,
+  ActivityRow,
+  AuditEntryUI,
   Chat,
   PolicyConfig,
   PolicyDiffItem,
+  Tab,
   Tier,
+  View,
   WalletState,
 } from "./types";
-
-const C = {
-  bg: "#0A0B0D",
-  sidebar: "#0C0D10",
-  surface: "#121418",
-  surface2: "#15171B",
-  ink: "#EDEEF0",
-  muted: "#A9AEB4",
-  faint: "#6B7178",
-  faint2: "#7C828A",
-  line: "rgba(255,255,255,.06)",
-  line2: "rgba(255,255,255,.07)",
-  orange: "#F7931A",
-  orangeSoft: "rgba(247,147,26,.12)",
-  green: "#3FB950",
-  red: "#F0616D",
-  sand: "#C99A5B",
-};
-const MONO = "'JetBrains Mono', monospace";
-const SANS = "'Space Grotesk', system-ui, sans-serif";
-
-type View = "overview" | "approvals" | "chat" | "plan";
-type Tab = "send" | "admin";
-
-type AuditEntryUI = {
-  id: string;
-  actor_label: string;
-  action: "propose" | "sign" | "message" | "join";
-  outcome: "success" | "failed" | null;
-  detail: string | null;
-  created_at: number;
-};
 
 function clampNeed(t: Tier): number {
   return Math.max(1, Math.min(t.minNeed, t.keys.length));
@@ -88,19 +61,6 @@ function chatToPolicyConfig(
     })),
   };
 }
-
-// On-chain activity derived from /api/chain/activity (real esplora tx history).
-type ActivityApiEntry = {
-  txid: string;
-  address: string;
-  direction: "in" | "out";
-  deltaSats: number;
-  confirmed: boolean;
-  blockHeight: number | null;
-  blockTime: number | null;
-  txUrl: string;
-};
-type ActivityRow = ActivityApiEntry & { vault: string };
 
 function fmtBtc(sats: number): string {
   return (Math.abs(sats) / 1e8).toLocaleString("en-US", {
@@ -2039,18 +1999,6 @@ function AuditPanel({ audit }: { audit: { entries?: AuditEntryUI[]; restricted?:
     </aside>
   );
 }
-
-const inputStyle: CSSProperties = {
-  width: "100%",
-  background: C.surface2,
-  border: "1px solid rgba(255,255,255,.1)",
-  color: C.ink,
-  borderRadius: 8,
-  padding: "9px 10px",
-  fontSize: 12.5,
-  fontFamily: "inherit",
-  outline: "none",
-};
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
