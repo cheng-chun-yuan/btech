@@ -129,6 +129,7 @@ fn sign_over_relay(
     signer_idx: &[usize],
     shares: &BTreeMap<ParticipantId, HtssLocalKeyShare>,
     config: &HierarchicalThresholdConfig,
+    group_key: &GroupKey,
     output_xonly: [u8; 32],
     tweak: [u8; 32],
     negate_key: bool,
@@ -147,7 +148,7 @@ fn sign_over_relay(
     }
     for (&pid, &i) in signer_set.iter().zip(signer_idx.iter()) {
         let share = htss_sign_share_for_output(
-            &GroupKey { xonly_public_key: output_xonly, verification_key_bytes: Vec::new() },
+            group_key,
             sighash,
             output_xonly,
             negate_key,
@@ -163,7 +164,8 @@ fn sign_over_relay(
     for (&pid, &i) in signer_set.iter().zip(signer_idx.iter()) {
         let drained = drain_sign_shares(&mut coords[i], &session, signer_set.len(), Duration::from_secs(20))?;
         let aggregate = aggregate_htss_signature_shares_for_output(
-            sighash, output_xonly, tweak, &nonce_sets[&pid], &drained, signer_set, config,
+            group_key, sighash, output_xonly, tweak, negate_key,
+            &nonce_sets[&pid], &drained, signer_set, config,
         )?;
         let bytes: [u8; 64] = aggregate.signature_bytes.as_slice().try_into()
             .map_err(|_| anyhow::anyhow!("aggregate signature must be 64 bytes"))?;
@@ -246,6 +248,14 @@ fn main() -> anyhow::Result<()> {
     let vault_file = data_dir.join("vault.json");
     let (group_key, shares): (GroupKey, BTreeMap<ParticipantId, HtssLocalKeyShare>) = if vault_file.exists() {
         let v: RelaygovVault = serde_json::from_slice(&std::fs::read(&vault_file)?)?;
+        if v.group_key.verification_key_bytes.is_empty() {
+            eprintln!(
+                "relaygov: WARNING — vault predates the hardened dkgkit (no verification key \
+                 material); bad signature shares cannot be attributed to a signer. Delete {} to \
+                 re-run DKG.",
+                vault_file.display()
+            );
+        }
         let shares = v.shares.into_iter().map(|s| (s.participant_id, s)).collect();
         eprintln!("relaygov: loaded persisted vault");
         (v.group_key, shares)
@@ -335,7 +345,7 @@ fn main() -> anyhow::Result<()> {
     anyhow::ensure!(sighashes.len() == 1, "this demo signs a single input");
 
     let signature = sign_over_relay(
-        &mut coords, &picked, &signer_idx, &shares, &dkg.config,
+        &mut coords, &picked, &signer_idx, &shares, &dkg.config, &group_key,
         tweak.output_xonly, tweak.tweak, tweak.negate_key, sighashes[0],
     )?;
     for c in &mut coords {

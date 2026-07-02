@@ -90,6 +90,14 @@ fn load_or_create_vault(data_dir: &Path, id: &str) -> anyhow::Result<WalletApp> 
     if let Ok(bytes) = std::fs::read(&path) {
         match serde_json::from_slice::<VaultKeyMaterial>(&bytes) {
             Ok(material) => {
+                if material.group_key.verification_key_bytes.is_empty() {
+                    eprintln!(
+                        "btech-vaultd: WARNING — vault '{id}' predates the hardened dkgkit \
+                         (no verification key material); bad signature shares cannot be \
+                         attributed to a signer. Delete {} to re-provision.",
+                        path.display()
+                    );
+                }
                 eprintln!("btech-vaultd: loaded persisted vault '{id}'");
                 return WalletApp::load(material);
             }

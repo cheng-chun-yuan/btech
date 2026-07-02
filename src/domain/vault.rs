@@ -419,6 +419,10 @@ impl VaultService {
             resharded.group_key.xonly_public_key == group_key.xonly_public_key,
             "reshare changed the group key"
         );
+        // Same x-only key, but reshare_htss recomputed verification_key_bytes for
+        // the NEW shares. The old group key's verification shares would reject
+        // every share signed with the reshared material.
+        let reshared_group_key = resharded.group_key.clone();
 
         // Build the replacement DKG service and share map up front: these are the
         // last fallible / allocating steps, so doing them BEFORE the swap keeps the
@@ -432,6 +436,7 @@ impl VaultService {
 
         // 3. Atomic swap: every assignment below is infallible, so the vault moves
         //    from the old policy to the new one in one indivisible step.
+        self.group_key = Some(reshared_group_key);
         self.local_shares = new_local_shares;
         self.dkg = new_dkg;
         self.grouped_config = new_grouped;
@@ -505,9 +510,11 @@ impl VaultService {
             .coordinator
             .drain_htss_signature_shares(&signing_session_id)?;
         let aggregate = aggregate_htss_signature_shares_for_output(
+            &group_key,
             sighash,
             output_xonly,
             tweak,
+            negate_key,
             &public_nonces,
             &signature_shares,
             &signer_set,

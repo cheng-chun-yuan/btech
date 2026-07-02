@@ -207,15 +207,19 @@ fn sign_over_relay(
     for (&pid, &i) in signer_set.iter().zip(signer_idx.iter()) {
         let drained = drain_sign_shares(&mut coords[i], &session, signer_set.len(), Duration::from_secs(20))?;
         let aggregate = match tweak {
-            Some((output_xonly, tweak_bytes, _)) => aggregate_htss_signature_shares_for_output(
-                message,
-                output_xonly,
-                tweak_bytes,
-                &nonce_sets[&pid],
-                &drained,
-                signer_set,
-                config,
-            )?,
+            Some((output_xonly, tweak_bytes, negate_key)) => {
+                aggregate_htss_signature_shares_for_output(
+                    group_key,
+                    message,
+                    output_xonly,
+                    tweak_bytes,
+                    negate_key,
+                    &nonce_sets[&pid],
+                    &drained,
+                    signer_set,
+                    config,
+                )?
+            }
             None => {
                 let a = aggregate_htss_signature_shares(
                     group_key,
@@ -312,6 +316,14 @@ fn main() -> anyhow::Result<()> {
     // ---- Load persisted vault, or run DKG over the relay and persist it. ----
     let (group_key, shares): (GroupKey, BTreeMap<ParticipantId, HtssLocalKeyShare>) = if have_persisted {
         let vault: RelaysignVault = serde_json::from_slice(&std::fs::read(&vault_file)?)?;
+        if vault.group_key.verification_key_bytes.is_empty() {
+            eprintln!(
+                "relaysign: WARNING — vault predates the hardened dkgkit (no verification key \
+                 material); bad signature shares cannot be attributed to a signer. Delete {} to \
+                 re-run DKG.",
+                vault_file.display()
+            );
+        }
         let shares = vault
             .shares
             .into_iter()
