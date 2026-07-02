@@ -137,7 +137,7 @@ and no vaultd.
 
 | Compromised | Attacker gets | Funds at risk? |
 |---|---|---|
-| Steward | incoming-payment visibility (scan key), censorship/DoS | No |
+| Steward | incoming-payment visibility (scan key), **vault-channel content** (it holds those channels' keys to post cards), censorship/DoS | No |
 | Relay | ciphertext + group metadata, DoS | No |
 | < threshold member devices | those shares (reshare rotates them out) | No |
 | ≥ threshold member devices | a signing quorum | **Yes — the defined security boundary** |
@@ -172,6 +172,9 @@ Channels are **NIP-29 groups** on the company relay. Two flavors:
 **All channel content is encrypted** with NIP-44 to a per-channel symmetric
 key, distributed to members via gift-wrap on join and **rotated whenever a
 member is removed**. Relay-side membership gating is defense in depth.
+The steward is a key-holding member of **vault channels only** (it must read
+proposals and post cards there); it holds no plain-channel keys and no DMs —
+this is reflected in the compromise matrix (§1).
 Interop consequence, stated honestly: generic NIP-29 clients (0xchat etc.) can
 see that groups exist and participate in the membership protocol, but cannot
 read content. Interop is at the protocol layer, not the content layer.
