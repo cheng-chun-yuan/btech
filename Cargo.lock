@@ -451,7 +451,7 @@ dependencies = [
 [[package]]
 name = "dkgkit-bitcoin"
 version = "0.1.0"
-source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=09e6744#09e6744b07384d59992b19ea0d976576c573db5d"
+source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=5f20ae7#5f20ae7641345ec3bfa1d909d5246fb6a3c5e4a6"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -464,7 +464,7 @@ dependencies = [
 [[package]]
 name = "dkgkit-core"
 version = "0.1.0"
-source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=09e6744#09e6744b07384d59992b19ea0d976576c573db5d"
+source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=5f20ae7#5f20ae7641345ec3bfa1d909d5246fb6a3c5e4a6"
 dependencies = [
  "serde",
  "serde_json",
@@ -474,7 +474,7 @@ dependencies = [
 [[package]]
 name = "dkgkit-frost"
 version = "0.1.0"
-source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=09e6744#09e6744b07384d59992b19ea0d976576c573db5d"
+source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=5f20ae7#5f20ae7641345ec3bfa1d909d5246fb6a3c5e4a6"
 dependencies = [
  "bincode 1.3.3",
  "dkgkit-core",
@@ -485,12 +485,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]
 name = "dkgkit-nostr"
 version = "0.1.0"
-source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=09e6744#09e6744b07384d59992b19ea0d976576c573db5d"
+source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=5f20ae7#5f20ae7641345ec3bfa1d909d5246fb6a3c5e4a6"
 dependencies = [
  "dkgkit-core",
  "dkgkit-transport",
@@ -503,7 +504,7 @@ dependencies = [
 [[package]]
 name = "dkgkit-sdk"
 version = "0.1.0"
-source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=09e6744#09e6744b07384d59992b19ea0d976576c573db5d"
+source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=5f20ae7#5f20ae7641345ec3bfa1d909d5246fb6a3c5e4a6"
 dependencies = [
  "dkgkit-bitcoin",
  "dkgkit-core",
@@ -514,7 +515,7 @@ dependencies = [
 [[package]]
 name = "dkgkit-transport"
 version = "0.1.0"
-source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=09e6744#09e6744b07384d59992b19ea0d976576c573db5d"
+source = "git+https://github.com/cheng-chun-yuan/dkgkit?rev=5f20ae7#5f20ae7641345ec3bfa1d909d5246fb6a3c5e4a6"
 dependencies = [
  "dkgkit-core",
 ]

@@ -54,7 +54,7 @@ pub struct SessionProofReport {
     pub tss: SignatureProof,
     pub htss: SignatureProof,
     pub invalid_htss_signer_set_rejected: bool,
-    pub high_rank_cannot_substitute_low_group: bool,
+    pub high_rank_can_substitute_low_group: bool,
     pub receive_address: String,
 }
 
@@ -70,7 +70,7 @@ pub fn run_session_proof(session_id: impl Into<String>) -> anyhow::Result<Sessio
     let (
         htss,
         invalid_htss_signer_set_rejected,
-        high_rank_cannot_substitute_low_group,
+        high_rank_can_substitute_low_group,
         receive_address,
     ) = run_htss_proof(&session_id)?;
 
@@ -83,7 +83,7 @@ pub fn run_session_proof(session_id: impl Into<String>) -> anyhow::Result<Sessio
         tss,
         htss,
         invalid_htss_signer_set_rejected,
-        high_rank_cannot_substitute_low_group,
+        high_rank_can_substitute_low_group,
         receive_address,
     })
 }
@@ -247,7 +247,10 @@ fn run_htss_proof(session_id: &str) -> anyhow::Result<(SignatureProof, bool, boo
             demo_invalid_signer_set()?,
         )
         .is_err();
-    let high_rank_cannot_substitute_low_group = vault
+    // Downward substitution (Tassa conjunctive semantics): 2 execs + 3 managers
+    // + 1 operator meets the cumulative quotas (1, 3, 6), so the spare exec and
+    // managers cover the missing operator slots and the set must sign + verify.
+    let high_rank_can_substitute_low_group = vault
         .sign_approval(
             format!("{session_id}-high-rank-substitution"),
             &approval,
@@ -260,7 +263,8 @@ fn run_htss_proof(session_id: &str) -> anyhow::Result<(SignatureProof, bool, boo
                 participant_id(6)?,
             ],
         )
-        .is_err();
+        .map(|signing| signing.verified)
+        .unwrap_or(false);
     let signer_set = demo_valid_signer_set()?;
     let signing =
         vault.sign_approval(format!("{session_id}-htss-signing"), &approval, signer_set)?;
@@ -276,7 +280,7 @@ fn run_htss_proof(session_id: &str) -> anyhow::Result<(SignatureProof, bool, boo
             verified: signing.verified,
         },
         invalid_htss_signer_set_rejected,
-        high_rank_cannot_substitute_low_group,
+        high_rank_can_substitute_low_group,
         address.address,
     ))
 }

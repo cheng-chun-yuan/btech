@@ -177,6 +177,8 @@ fn sign_over_relay(
 
     // SIGN (round 2): each signer publishes its share for the agreed message.
     for (&pid, &i) in signer_set.iter().zip(signer_idx.iter()) {
+        // remove() moves the nonce out of the map — signing consumes it by value.
+        let nonce = local_nonces.remove(&pid).context("missing local nonce for signer")?;
         let share = match tweak {
             Some((output_xonly, _, negate_key)) => htss_sign_share_for_output(
                 group_key,
@@ -184,7 +186,7 @@ fn sign_over_relay(
                 output_xonly,
                 negate_key,
                 &shares[&pid],
-                &local_nonces[&pid],
+                nonce,
                 &nonce_sets[&pid],
                 signer_set,
                 config,
@@ -193,7 +195,7 @@ fn sign_over_relay(
                 group_key,
                 message,
                 &shares[&pid],
-                &local_nonces[&pid],
+                nonce,
                 &nonce_sets[&pid],
                 signer_set,
                 config,
@@ -318,9 +320,9 @@ fn main() -> anyhow::Result<()> {
         let vault: RelaysignVault = serde_json::from_slice(&std::fs::read(&vault_file)?)?;
         if vault.group_key.verification_key_bytes.is_empty() {
             eprintln!(
-                "relaysign: WARNING — vault predates the hardened dkgkit (no verification key \
-                 material); bad signature shares cannot be attributed to a signer. Delete {} to \
-                 re-run DKG.",
+                "relaysign: WARNING — vault predates the hardened dkgkit; its grouped shares \
+                 use the old per-tier derivative order and will be REJECTED at signing (rank \
+                 mismatch). Delete {} to re-run DKG.",
                 vault_file.display()
             );
         }

@@ -198,7 +198,7 @@ export type SessionProofReport = {
   tss: SignatureProofWire;
   htss: SignatureProofWire;
   invalid_htss_signer_set_rejected: boolean;
-  high_rank_cannot_substitute_low_group: boolean;
+  high_rank_can_substitute_low_group: boolean;
   receive_address: string;
 };
 

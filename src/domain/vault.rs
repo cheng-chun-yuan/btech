@@ -225,7 +225,9 @@ impl VaultService {
         }
         let public_nonces = self.coordinator.drain_htss_nonces(&signing_session_id)?;
 
-        for (share, nonce) in selected_shares.iter().zip(local_nonces.iter()) {
+        // `zip(local_nonces)` moves each nonce into the signer, which consumes
+        // it by value — a nonce can never be used for two signatures.
+        for (share, nonce) in selected_shares.iter().zip(local_nonces) {
             let signature_share = htss_sign_share(
                 &group_key,
                 digest,
@@ -338,11 +340,13 @@ impl VaultService {
         self.sign_sessions.remove(signing_session_id);
 
         let public_nonces = self.coordinator.drain_htss_nonces(&session)?;
-        for (share, nonce) in &selected {
+        // Consuming `selected` moves each nonce into the signer by value, so a
+        // pre-committed nonce is spent exactly once.
+        for (share, nonce) in selected {
             let signature_share = htss_sign_share(
                 &group_key,
                 digest,
-                share,
+                &share,
                 nonce,
                 &public_nonces,
                 &signer_set,
@@ -490,7 +494,7 @@ impl VaultService {
         }
         let public_nonces = self.coordinator.drain_htss_nonces(&signing_session_id)?;
 
-        for (share, nonce) in selected_shares.iter().zip(local_nonces.iter()) {
+        for (share, nonce) in selected_shares.iter().zip(local_nonces) {
             let signature_share = htss_sign_share_for_output(
                 &group_key,
                 sighash,

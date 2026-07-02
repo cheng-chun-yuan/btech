@@ -720,7 +720,7 @@ mod tests {
         assert_eq!(report.htss.signer_set, vec![1, 3, 4, 6, 7, 8]);
         assert!(report.htss.verified);
         assert!(report.invalid_htss_signer_set_rejected);
-        assert!(report.high_rank_cannot_substitute_low_group);
+        assert!(report.high_rank_can_substitute_low_group);
         assert!(report.tss_boundary.contains("not merged into HTSS"));
         assert!(report.receive_address.starts_with("bcrt1"));
     }

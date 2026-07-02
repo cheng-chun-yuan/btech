@@ -92,9 +92,9 @@ fn load_or_create_vault(data_dir: &Path, id: &str) -> anyhow::Result<WalletApp> 
             Ok(material) => {
                 if material.group_key.verification_key_bytes.is_empty() {
                     eprintln!(
-                        "btech-vaultd: WARNING — vault '{id}' predates the hardened dkgkit \
-                         (no verification key material); bad signature shares cannot be \
-                         attributed to a signer. Delete {} to re-provision.",
+                        "btech-vaultd: WARNING — vault '{id}' predates the hardened dkgkit; \
+                         its grouped shares use the old per-tier derivative order and will be \
+                         REJECTED at signing (rank mismatch). Delete {} to re-key.",
                         path.display()
                     );
                 }

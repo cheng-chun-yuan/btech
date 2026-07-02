@@ -147,13 +147,15 @@ fn sign_over_relay(
         nonce_sets.insert(pid, drain_nonces(&mut coords[i], &session, signer_set.len(), Duration::from_secs(20))?);
     }
     for (&pid, &i) in signer_set.iter().zip(signer_idx.iter()) {
+        // remove() moves the nonce out of the map — signing consumes it by value.
+        let nonce = local_nonces.remove(&pid).context("missing local nonce for signer")?;
         let share = htss_sign_share_for_output(
             group_key,
             sighash,
             output_xonly,
             negate_key,
             &shares[&pid],
-            &local_nonces[&pid],
+            nonce,
             &nonce_sets[&pid],
             signer_set,
             config,
@@ -250,9 +252,9 @@ fn main() -> anyhow::Result<()> {
         let v: RelaygovVault = serde_json::from_slice(&std::fs::read(&vault_file)?)?;
         if v.group_key.verification_key_bytes.is_empty() {
             eprintln!(
-                "relaygov: WARNING — vault predates the hardened dkgkit (no verification key \
-                 material); bad signature shares cannot be attributed to a signer. Delete {} to \
-                 re-run DKG.",
+                "relaygov: WARNING — vault predates the hardened dkgkit; its grouped shares \
+                 use the old per-tier derivative order and will be REJECTED at signing (rank \
+                 mismatch). Delete {} to re-run DKG.",
                 vault_file.display()
             );
         }

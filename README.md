@@ -30,9 +30,10 @@ DKGKit gives BTech the full threshold-signing lifecycle:
 - **DKG** — distributed key generation; shares are created collectively, the
   full key is never materialized.
 - **Grouped / hierarchical threshold signing** — a policy like
-  `(1,2,3)-of-(2,3,5)` across C-level / Managers / Operators tiers. A spend
-  needs a quorum from **each** tier; a high-rank signer cannot substitute for a
-  missing lower-rank group.
+  `(1,2,3)-of-(2,3,5)` across C-level / Managers / Operators tiers, enforced by
+  the key shares themselves. A spend needs cumulative quorums counted from the
+  top tier down — a higher-rank signer may cover a missing lower-rank slot, but
+  never the reverse.
 - **Reshare** — rotate the signer set and refresh shares (onboard/offboard a
   signer, recover from a lost device) **without changing the vault address or
   exposing the key**.
