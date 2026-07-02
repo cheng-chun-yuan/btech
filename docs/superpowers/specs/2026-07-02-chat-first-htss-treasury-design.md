@@ -5,6 +5,8 @@
 **Relationship to btech:** greenfield design; btech is the reference prototype
 whose validated pieces (BIP-352 TS crypto, Esplora scanner, dkgkit FROST,
 collapsed two-round signing UX) are reused as libraries, not as architecture.
+**Repository:** a new repo, **`bChannel`** — btech is never refactored; see
+"Repository strategy" below.
 
 ---
 
@@ -41,6 +43,41 @@ payments are the default** for both sending and receiving — on Bitcoin L1
 10. **Architecture A: event-sourced on the relay with an untrusted steward** —
     chosen over a fat-backend (DB source of truth) and pure P2P (no
     coordinator).
+11. **New repository `bChannel`** (user, 2026-07-02) — no refactoring of the
+    btech codebase; a fresh repo, well-organized from the first commit.
+
+---
+
+## Repository strategy — `bChannel`
+
+- **btech is frozen as the reference prototype.** Nothing in it is refactored
+  or moved for this project; it stays runnable as-is.
+- **Reuse by extraction, not by import.** Validated code is copied into
+  `bChannel` packages together with its tests and vectors — the BIP-352 TS
+  crypto + official vectors, the Esplora block-walk scanner, and the collapsed
+  two-round ceremony semantics. `dkgkit` is consumed as a git-pinned dependency
+  and compiled to WASM; it is the one shared artifact between the two repos.
+- **Monorepo layout (Bun workspaces):**
+
+  ```
+  bChannel/
+    packages/
+      protocol/     event kinds, schemas, channel-key + gift-wrap helpers (no I/O)
+      crypto/       BIP-352 (with vectors), dkgkit-wasm bindings, key-vault
+      rails/        Rail interface, L1Rail, ArkadeRail + conformance suite
+      steward/      ceremony sequencer, scanner, policy, broadcast (Bun service)
+      web/          PWA chat client
+    deploy/         docker-compose, relay29 + chain-backend configs
+    docs/           this spec (copied at init), plans, ADRs
+  ```
+
+  Dependency direction is one-way: `web`/`steward` → `rails` → `crypto` →
+  `protocol`. `protocol` and `crypto` are pure (no network, no storage), which
+  is what keeps them unit-testable against vectors.
+- **Quality gates from the first commit:** CI (typecheck, lint, tests) exists
+  before any feature code; conventional commits; every package lands with its
+  tests; MIT license, README, and CONTRIBUTING at init. The repo is born the
+  way btech had to be retrofitted.
 
 ---
 
@@ -282,6 +319,10 @@ in the same step.
 
 ## 6. Phasing
 
+- **M0 — Repo bootstrap:** `bChannel` monorepo scaffold (workspaces, CI,
+  lint/typecheck/test gates, LICENSE/README/CONTRIBUTING), spec copied into
+  `docs/`, extracted `crypto` package passing the BIP-352 vectors, dkgkit
+  WASM build proven with native/WASM parity tests.
 - **M1 — Platform:** relay + NIP-29 encrypted channels/DMs, identity +
   onboarding, docker compose skeleton.
 - **M2 — Vaults:** WASM dkgkit, DKG ceremony, L1 regtest rail, silent-payment
